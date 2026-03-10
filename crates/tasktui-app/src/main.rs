@@ -178,7 +178,6 @@ enum ProcessCategory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcessListEntry {
-    Header(&'static str),
     Row(usize),
 }
 
@@ -366,6 +365,14 @@ struct SystemSummary {
     tcp_endpoint_count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct GroupedProcessViewState {
+    apps_offset: usize,
+    background_offset: usize,
+    apps_visible_rows: usize,
+    background_visible_rows: usize,
+}
+
 struct AppState {
     system: System,
     process_rows: Vec<ProcessRow>,
@@ -387,6 +394,7 @@ struct AppState {
     network_filter: NetworkStateFilter,
     overlay: Overlay,
     process_view: ViewState,
+    grouped_process_view: GroupedProcessViewState,
     service_view: ViewState,
     network_view: ViewState,
     priority_cache: HashMap<u32, String>,
@@ -428,6 +436,11 @@ impl AppState {
             process_view: ViewState {
                 visible_rows: 1,
                 ..ViewState::default()
+            },
+            grouped_process_view: GroupedProcessViewState {
+                apps_visible_rows: 1,
+                background_visible_rows: 1,
+                ..GroupedProcessViewState::default()
             },
             service_view: ViewState {
                 visible_rows: 1,
@@ -618,13 +631,7 @@ impl AppState {
                 .selected
                 .min(self.filtered_rows.len().saturating_sub(1));
         }
-        let entries = self.process_entries();
-        self.process_view.offset = adjusted_process_offset(
-            &entries,
-            self.process_view.selected,
-            self.process_view.offset,
-            self.process_view.visible_rows.max(1),
-        );
+        self.sync_process_view_state();
     }
 
     fn rebuild_service_view(&mut self) {
@@ -716,12 +723,7 @@ impl AppState {
                 let entries = self.process_entries();
                 self.process_view.selected =
                     next_process_index(&entries, self.process_view.selected).unwrap_or(self.process_view.selected);
-                self.process_view.offset = adjusted_process_offset(
-                    &entries,
-                    self.process_view.selected,
-                    self.process_view.offset,
-                    self.process_view.visible_rows.max(1),
-                );
+                self.sync_process_view_state();
             }
             ActiveTab::Services => self.service_view.select_next(self.filtered_services.len()),
             ActiveTab::Network => self.network_view.select_next(self.filtered_network.len()),
@@ -738,12 +740,7 @@ impl AppState {
                 let entries = self.process_entries();
                 self.process_view.selected =
                     prev_process_index(&entries, self.process_view.selected).unwrap_or(self.process_view.selected);
-                self.process_view.offset = adjusted_process_offset(
-                    &entries,
-                    self.process_view.selected,
-                    self.process_view.offset,
-                    self.process_view.visible_rows.max(1),
-                );
+                self.sync_process_view_state();
             }
             ActiveTab::Services => self.service_view.select_prev(self.filtered_services.len()),
             ActiveTab::Network => self.network_view.select_prev(self.filtered_network.len()),
@@ -781,7 +778,63 @@ impl AppState {
                 .map(|(index, _)| ProcessListEntry::Row(index))
                 .collect()
         } else {
-            build_process_entries(&self.filtered_rows)
+            let (apps, background) = grouped_process_indexes(&self.filtered_rows);
+            apps.into_iter()
+                .chain(background)
+                .map(ProcessListEntry::Row)
+                .collect()
+        }
+    }
+
+    fn grouped_process_indexes(&self) -> (Vec<usize>, Vec<usize>) {
+        grouped_process_indexes(&self.filtered_rows)
+    }
+
+    fn sync_process_view_state(&mut self) {
+        if self.process_sort_enabled {
+            let entries = self.process_entries();
+            self.process_view.offset = adjusted_process_offset(
+                &entries,
+                self.process_view.selected,
+                self.process_view.offset,
+                self.process_view.visible_rows.max(1),
+            );
+            return;
+        }
+
+        let (apps, background) = self.grouped_process_indexes();
+        self.grouped_process_view.apps_offset = self
+            .grouped_process_view
+            .apps_offset
+            .min(apps.len().saturating_sub(self.grouped_process_view.apps_visible_rows.max(1)));
+        self.grouped_process_view.background_offset = self
+            .grouped_process_view
+            .background_offset
+            .min(background.len().saturating_sub(self.grouped_process_view.background_visible_rows.max(1)));
+
+        if let Some(row) = self.filtered_rows.get(self.process_view.selected) {
+            match row.category {
+                ProcessCategory::App => {
+                    if let Some(index) = apps.iter().position(|entry| *entry == self.process_view.selected) {
+                        self.grouped_process_view.apps_offset = adjusted_offset(
+                            apps.len(),
+                            index,
+                            self.grouped_process_view.apps_offset,
+                            self.grouped_process_view.apps_visible_rows.max(1),
+                        );
+                    }
+                }
+                ProcessCategory::Background => {
+                    if let Some(index) = background.iter().position(|entry| *entry == self.process_view.selected) {
+                        self.grouped_process_view.background_offset = adjusted_offset(
+                            background.len(),
+                            index,
+                            self.grouped_process_view.background_offset,
+                            self.grouped_process_view.background_visible_rows.max(1),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -825,6 +878,11 @@ impl AppState {
             body_sections[0].height.saturating_sub(3) as usize
         }
         .max(1);
+        if !self.process_sort_enabled {
+            let (_, apps_list_area, _, background_list_area) = grouped_process_sections(body_sections[0]);
+            self.grouped_process_view.apps_visible_rows = apps_list_area.height as usize;
+            self.grouped_process_view.background_visible_rows = background_list_area.height as usize;
+        }
         self.service_view.visible_rows = (body_sections[0].height.saturating_sub(3) as usize).max(1);
         let network_sections = network_list_sections(body_sections[0]);
         self.network_view.visible_rows = (network_sections[1].height.saturating_sub(3) as usize).max(1);
@@ -832,13 +890,7 @@ impl AppState {
             .process_view
             .selected
             .min(self.filtered_rows.len().saturating_sub(1));
-        let entries = self.process_entries();
-        self.process_view.offset = adjusted_process_offset(
-            &entries,
-            self.process_view.selected,
-            self.process_view.offset,
-            self.process_view.visible_rows.max(1),
-        );
+        self.sync_process_view_state();
         self.service_view.clamp(self.filtered_services.len());
         self.network_view.clamp(self.filtered_network.len());
     }
@@ -862,6 +914,21 @@ impl AppState {
     }
 
     fn visible_process_pids(&self) -> Vec<u32> {
+        if !self.process_sort_enabled {
+            let (apps, background) = self.grouped_process_indexes();
+            return apps
+                .iter()
+                .skip(self.grouped_process_view.apps_offset)
+                .take(self.grouped_process_view.apps_visible_rows.max(1))
+                .chain(
+                    background
+                        .iter()
+                        .skip(self.grouped_process_view.background_offset)
+                        .take(self.grouped_process_view.background_visible_rows.max(1)),
+                )
+                .filter_map(|index| self.filtered_rows.get(*index).map(|row| row.pid))
+                .collect();
+        }
         let entries = self.process_entries();
         let selected_display = selected_display_index(&entries, self.process_view.selected).unwrap_or(0);
         let (offset, _) = visible_window(
@@ -876,7 +943,6 @@ impl AppState {
             .take(self.process_view.visible_rows.max(1))
             .filter_map(|entry| match entry {
                 ProcessListEntry::Row(index) => self.filtered_rows.get(*index).map(|row| row.pid),
-                ProcessListEntry::Header(_) => None,
             })
             .collect()
     }
@@ -1455,19 +1521,6 @@ fn render_process_table(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppSta
         .skip(offset)
         .take(visible_rows.max(1))
         .map(|entry| match entry {
-            ProcessListEntry::Header(label) => Row::new(vec![
-                Cell::from(*label),
-                Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-            ])
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
             ProcessListEntry::Row(index) => {
                 let row = &app.filtered_rows[*index];
                 Row::new(vec![
@@ -1512,54 +1565,14 @@ fn render_process_table(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppSta
 }
 
 fn render_grouped_process_list(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
-    let entries = app.process_entries();
-    let selected_display = selected_display_index(&entries, app.process_view.selected).unwrap_or(0);
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let (offset, selected_in_view) = visible_window(
-        entries.len(),
-        selected_display,
-        app.process_view.offset,
-        visible_rows.max(1),
-    );
-    let items: Vec<ListItem<'_>> = entries
-        .iter()
-        .skip(offset)
-        .take(visible_rows.max(1))
-        .map(|entry| match entry {
-            ProcessListEntry::Header(label) => ListItem::new(Line::from(Span::styled(
-                *label,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ))),
-            ProcessListEntry::Row(index) => {
-                let row = &app.filtered_rows[*index];
-                let line = format!(
-                    "{:<7} {:>5.1} {:>10} {:>8} {:<13} {}",
-                    row.pid,
-                    row.cpu_percent,
-                    format_memory(row.memory_bytes),
-                    format_runtime(row.runtime_secs),
-                    row.priority,
-                    row.name
-                );
-                ListItem::new(Line::from(Span::styled(line, process_row_style(row))))
-            }
-        })
-        .collect();
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(Color::Blue))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Processes | Apps and background | sort=off | / search | right-click actions"),
-        );
-    let mut state = ListState::default();
-    state.select(selected_in_view);
-    frame.render_stateful_widget(list, area, &mut state);
+    render_grouped_process_sections(frame, area, app, false);
 }
 
 fn render_process_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if !app.process_sort_enabled {
+        render_grouped_process_sections(frame, area, app, true);
+        return;
+    }
     let entries = app.process_entries();
     let selected_display = selected_display_index(&entries, app.process_view.selected).unwrap_or(0);
     let visible_rows = area.height.saturating_sub(2) as usize;
@@ -1574,12 +1587,6 @@ fn render_process_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppStat
         .skip(offset)
         .take(visible_rows.max(1))
         .map(|entry| match entry {
-            ProcessListEntry::Header(label) => ListItem::new(Line::from(Span::styled(
-                *label,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ))),
             ProcessListEntry::Row(index) => {
                 let row = &app.filtered_rows[*index];
                 let line = Line::from(vec![
@@ -1611,6 +1618,127 @@ fn render_process_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppStat
         );
     let mut state = ListState::default();
     state.select(selected_in_view);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_grouped_process_sections(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    tree_mode: bool,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title(if tree_mode {
+            "Processes | sort=off | grouped tree"
+        } else {
+            "Processes | sort=off | grouped"
+        });
+    frame.render_widget(outer, area);
+
+    let (apps, background) = app.grouped_process_indexes();
+    let (apps_header, apps_list_area, background_header, background_list_area) = grouped_process_sections(area);
+
+    render_process_group_header(frame, apps_header, "Apps", apps.len(), Color::Cyan);
+    render_process_group_header(frame, background_header, "Background", background.len(), Color::DarkGray);
+    render_process_group_list(
+        frame,
+        apps_list_area,
+        &apps,
+        app,
+        app.grouped_process_view.apps_offset,
+        tree_mode,
+    );
+    render_process_group_list(
+        frame,
+        background_list_area,
+        &background,
+        app,
+        app.grouped_process_view.background_offset,
+        tree_mode,
+    );
+
+}
+
+fn render_process_group_header(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    label: &str,
+    count: usize,
+    background: Color,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let header = Paragraph::new(format!("{label} ({count})"))
+        .style(Style::default().fg(Color::Black).bg(background).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, area);
+}
+
+fn render_process_group_list(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    indexes: &[usize],
+    app: &AppState,
+    offset: usize,
+    tree_mode: bool,
+) {
+    let selected_in_group = indexes
+        .iter()
+        .position(|index| *index == app.process_view.selected);
+    let (_, selected_in_view) = visible_window(
+        indexes.len(),
+        selected_in_group.unwrap_or(0),
+        offset,
+        area.height.max(1) as usize,
+    );
+    let items: Vec<ListItem<'_>> = indexes
+        .iter()
+        .skip(offset)
+        .take(area.height.max(1) as usize)
+        .map(|index| {
+            let row = &app.filtered_rows[*index];
+            if tree_mode {
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("{}{}", "  ".repeat(row.depth), row.name),
+                        process_row_style(row),
+                    ),
+                    Span::styled(
+                        format!(
+                            " [{}] {:.1}% {} {}",
+                            row.pid,
+                            row.cpu_percent,
+                            format_memory(row.memory_bytes),
+                            row.priority
+                        ),
+                        process_row_style(row).fg(Color::DarkGray),
+                    ),
+                ]);
+                ListItem::new(line)
+            } else {
+                let line = format!(
+                    "{:<7} {:>5.1} {:>10} {:>8} {:<13} {}",
+                    row.pid,
+                    row.cpu_percent,
+                    format_memory(row.memory_bytes),
+                    format_runtime(row.runtime_secs),
+                    row.priority,
+                    row.name
+                );
+                ListItem::new(Line::from(Span::styled(line, process_row_style(row))))
+            }
+        })
+        .collect();
+
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = ListState::default();
+    state.select(selected_in_view.filter(|_| selected_in_group.is_some()));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -2475,52 +2603,22 @@ fn tabs_hit_areas(area: Rect) -> Vec<Rect> {
     areas
 }
 
-fn build_process_entries(rows: &[ProcessRow]) -> Vec<ProcessListEntry> {
-    let app_indexes: Vec<usize> = rows
+fn grouped_process_indexes(rows: &[ProcessRow]) -> (Vec<usize>, Vec<usize>) {
+    let apps = rows
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| {
-            if matches!(row.category, ProcessCategory::App) {
-                Some(index)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(index, row)| matches!(row.category, ProcessCategory::App).then_some(index))
         .collect();
-    let background_indexes: Vec<usize> = rows
+    let background = rows
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| {
-            if matches!(row.category, ProcessCategory::Background) {
-                Some(index)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(index, row)| matches!(row.category, ProcessCategory::Background).then_some(index))
         .collect();
-
-    let mut entries = Vec::new();
-    entries.push(ProcessListEntry::Header("Apps"));
-    entries.extend(app_indexes.into_iter().map(ProcessListEntry::Row));
-    entries.push(ProcessListEntry::Header("Background processes"));
-    entries.extend(background_indexes.into_iter().map(ProcessListEntry::Row));
-    entries
+    (apps, background)
 }
 
 fn selected_display_index(entries: &[ProcessListEntry], selected_process_index: usize) -> Option<usize> {
     entries.iter().position(|entry| matches!(entry, ProcessListEntry::Row(index) if *index == selected_process_index))
-}
-
-fn process_anchor_display_index(entries: &[ProcessListEntry], selected_process_index: usize) -> Option<usize> {
-    let selected_display = selected_display_index(entries, selected_process_index)?;
-    if matches!(
-        selected_display.checked_sub(1).and_then(|index| entries.get(index)),
-        Some(ProcessListEntry::Header(_))
-    ) {
-        Some(selected_display.saturating_sub(1))
-    } else {
-        Some(selected_display)
-    }
 }
 
 fn adjusted_process_offset(
@@ -2529,22 +2627,12 @@ fn adjusted_process_offset(
     offset: usize,
     visible_rows: usize,
 ) -> usize {
-    let anchor_display = process_anchor_display_index(entries, selected_process_index).unwrap_or(0);
-    adjusted_offset(entries.len(), anchor_display, offset, visible_rows.max(1))
+    let selected_display = selected_display_index(entries, selected_process_index).unwrap_or(0);
+    adjusted_offset(entries.len(), selected_display, offset, visible_rows.max(1))
 }
 
 fn display_to_process_index(entries: &[ProcessListEntry], display_index: usize) -> Option<usize> {
-    match entries.get(display_index) {
-        Some(ProcessListEntry::Row(index)) => Some(*index),
-        Some(ProcessListEntry::Header(_)) => entries
-            .iter()
-            .skip(display_index + 1)
-            .find_map(|entry| match entry {
-                ProcessListEntry::Row(index) => Some(*index),
-                ProcessListEntry::Header(_) => None,
-            }),
-        None => None,
-    }
+    entries.get(display_index).map(|ProcessListEntry::Row(index)| *index)
 }
 
 fn next_process_index(entries: &[ProcessListEntry], current_process_index: usize) -> Option<usize> {
@@ -2552,10 +2640,10 @@ fn next_process_index(entries: &[ProcessListEntry], current_process_index: usize
     entries
         .iter()
         .skip(current_display.saturating_add(1))
-        .find_map(|entry| match entry {
-            ProcessListEntry::Row(index) => Some(*index),
-            ProcessListEntry::Header(_) => None,
+        .map(|entry| match entry {
+            ProcessListEntry::Row(index) => *index,
         })
+        .next()
         .or(Some(current_process_index))
 }
 
@@ -2565,11 +2653,37 @@ fn prev_process_index(entries: &[ProcessListEntry], current_process_index: usize
         .iter()
         .take(current_display)
         .rev()
-        .find_map(|entry| match entry {
-            ProcessListEntry::Row(index) => Some(*index),
-            ProcessListEntry::Header(_) => None,
+        .map(|entry| match entry {
+            ProcessListEntry::Row(index) => *index,
         })
+        .next()
         .or(Some(current_process_index))
+}
+
+fn grouped_process_sections(area: Rect) -> (Rect, Rect, Rect, Rect) {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    if inner.height < 4 {
+        return (
+            Rect::new(inner.x, inner.y, inner.width, inner.height.min(1)),
+            Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 0),
+            Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 0),
+            Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 0),
+        );
+    }
+
+    let remaining = inner.height.saturating_sub(2);
+    let apps_list_height = (remaining / 2).max(1);
+    let background_list_height = remaining.saturating_sub(apps_list_height).max(1);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(apps_list_height),
+            Constraint::Length(1),
+            Constraint::Length(background_list_height),
+        ])
+        .split(inner);
+    (layout[0], layout[1], layout[2], layout[3])
 }
 
 fn network_filter_at_position(area: Rect, x: u16) -> Option<NetworkStateFilter> {
@@ -2589,6 +2703,24 @@ fn network_filter_at_position(area: Rect, x: u16) -> Option<NetworkStateFilter> 
 fn select_row_at(app: &mut AppState, list_area: Rect, row: u16) {
     match app.active_tab {
         ActiveTab::Processes => {
+            if !app.process_sort_enabled {
+                let (_, apps_list_area, _, background_list_area) = grouped_process_sections(list_area);
+                let (apps, background) = app.grouped_process_indexes();
+                if let Some(index) = list_index_at_row(apps_list_area, row, false) {
+                    let visible_index = index.saturating_add(app.grouped_process_view.apps_offset);
+                    if let Some(process_index) = apps.get(visible_index) {
+                        app.process_view.selected = *process_index;
+                        app.sync_process_view_state();
+                    }
+                } else if let Some(index) = list_index_at_row(background_list_area, row, false) {
+                    let visible_index = index.saturating_add(app.grouped_process_view.background_offset);
+                    if let Some(process_index) = background.get(visible_index) {
+                        app.process_view.selected = *process_index;
+                        app.sync_process_view_state();
+                    }
+                }
+                return;
+            }
             let has_header = app.process_sort_enabled && !app.show_tree;
             if let Some(index) = list_index_at_row(list_area, row, has_header) {
                 let entries = app.process_entries();
@@ -2596,12 +2728,7 @@ fn select_row_at(app: &mut AppState, list_area: Rect, row: u16) {
                 if let Some(process_index) = display_to_process_index(&entries, visible_index) {
                     app.process_view.selected = process_index.min(app.filtered_rows.len().saturating_sub(1));
                 }
-                app.process_view.offset = adjusted_process_offset(
-                    &entries,
-                    app.process_view.selected,
-                    app.process_view.offset,
-                    app.process_view.visible_rows.max(1),
-                );
+                app.sync_process_view_state();
             }
         }
         ActiveTab::Services => {
@@ -2890,6 +3017,7 @@ mod tests {
         app.process_view.visible_rows = 2;
         app.process_view.selected = 3;
         app.process_view.offset = 2;
+        app.process_sort_enabled = true;
         assert_eq!(app.visible_process_pids(), vec![2, 3]);
     }
 
@@ -2916,7 +3044,7 @@ mod tests {
     }
 
     #[test]
-    fn process_entries_are_grouped_into_apps_and_background() {
+    fn grouped_process_indexes_keep_apps_before_background() {
         let rows = vec![
             ProcessRow {
                 pid: 1,
@@ -2955,17 +3083,26 @@ mod tests {
                 runtime_secs: 0,
             },
         ];
-        let entries = build_process_entries(&rows);
-        assert_eq!(entries[0], ProcessListEntry::Header("Apps"));
-        assert_eq!(entries[1], ProcessListEntry::Row(0));
-        assert_eq!(entries[2], ProcessListEntry::Row(2));
-        assert_eq!(entries[3], ProcessListEntry::Header("Background processes"));
-        assert_eq!(entries[4], ProcessListEntry::Row(1));
+        let (apps, background) = grouped_process_indexes(&rows);
+        assert_eq!(apps, vec![0, 2]);
+        assert_eq!(background, vec![1]);
     }
 
     #[test]
-    fn process_entries_always_include_apps_header() {
+    fn process_entries_are_grouped_without_header_rows_when_sort_is_off() {
         let rows = vec![ProcessRow {
+            pid: 1,
+            parent_pid: None,
+            depth: 0,
+            category: ProcessCategory::App,
+            name: "app".into(),
+            exe_path: None,
+            priority: "normal".into(),
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            runtime_secs: 0,
+        },
+        ProcessRow {
             pid: 2,
             parent_pid: None,
             depth: 0,
@@ -2977,43 +3114,20 @@ mod tests {
             memory_bytes: 0,
             runtime_secs: 0,
         }];
-        let entries = build_process_entries(&rows);
-        assert_eq!(entries[0], ProcessListEntry::Header("Apps"));
-        assert_eq!(entries[1], ProcessListEntry::Header("Background processes"));
-        assert_eq!(entries[2], ProcessListEntry::Row(0));
+        let mut app = AppState::new();
+        app.filtered_rows = rows;
+        let entries = app.process_entries();
+        assert_eq!(entries, vec![ProcessListEntry::Row(0), ProcessListEntry::Row(1)]);
     }
 
     #[test]
-    fn grouped_offset_keeps_header_visible_for_first_app_row() {
-        let rows = vec![
-            ProcessRow {
-                pid: 1,
-                parent_pid: None,
-                depth: 0,
-                category: ProcessCategory::App,
-                name: "app".into(),
-                exe_path: None,
-                priority: "normal".into(),
-                cpu_percent: 0.0,
-                memory_bytes: 0,
-                runtime_secs: 0,
-            },
-            ProcessRow {
-                pid: 2,
-                parent_pid: None,
-                depth: 0,
-                category: ProcessCategory::Background,
-                name: "bg".into(),
-                exe_path: None,
-                priority: "normal".into(),
-                cpu_percent: 0.0,
-                memory_bytes: 0,
-                runtime_secs: 0,
-            },
-        ];
-        let entries = build_process_entries(&rows);
-        assert_eq!(adjusted_process_offset(&entries, 0, 0, 1), 0);
-        assert_eq!(adjusted_process_offset(&entries, 0, 1, 5), 0);
+    fn grouped_process_sections_reserve_header_bands() {
+        let area = Rect::new(0, 0, 80, 20);
+        let (apps_header, apps_list, background_header, background_list) = grouped_process_sections(area);
+        assert_eq!(apps_header.height, 1);
+        assert_eq!(background_header.height, 1);
+        assert!(apps_list.height > 0);
+        assert!(background_list.height > 0);
     }
 
     #[test]
@@ -3070,24 +3184,17 @@ mod tests {
     }
 
     #[test]
-    fn display_index_maps_to_next_process_after_header() {
-        let entries = vec![
-            ProcessListEntry::Header("Apps"),
-            ProcessListEntry::Row(0),
-            ProcessListEntry::Header("Background processes"),
-            ProcessListEntry::Row(1),
-        ];
+    fn display_index_maps_to_process_row() {
+        let entries = vec![ProcessListEntry::Row(0), ProcessListEntry::Row(1)];
         assert_eq!(display_to_process_index(&entries, 0), Some(0));
-        assert_eq!(display_to_process_index(&entries, 2), Some(1));
+        assert_eq!(display_to_process_index(&entries, 1), Some(1));
     }
 
     #[test]
     fn process_navigation_follows_grouped_display_order() {
         let entries = vec![
-            ProcessListEntry::Header("Apps"),
             ProcessListEntry::Row(2),
             ProcessListEntry::Row(4),
-            ProcessListEntry::Header("Background processes"),
             ProcessListEntry::Row(1),
         ];
         assert_eq!(next_process_index(&entries, 2), Some(4));
