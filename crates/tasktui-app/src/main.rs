@@ -1892,17 +1892,24 @@ fn render_performance_view(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sections[0]);
 
-    let cpu_history: Vec<u64> = app.system_cpu_history.iter().copied().collect();
+    let cpu_history_raw: Vec<u64> = app.system_cpu_history.iter().copied().collect();
+    let cpu_history = fit_history_to_width(&cpu_history_raw, charts[0].width.saturating_sub(2) as usize);
     let cpu = Sparkline::default()
         .block(Block::default().borders(Borders::ALL).title("CPU History (60s)"))
         .style(Style::default().fg(Color::LightRed))
+        .max(100)
+        .absent_value_style(Style::default().fg(Color::DarkGray))
         .data(&cpu_history);
     frame.render_widget(cpu, charts[0]);
 
-    let memory_history: Vec<u64> = app.system_memory_history.iter().copied().collect();
+    let memory_history_raw: Vec<u64> = app.system_memory_history.iter().copied().collect();
+    let memory_history =
+        fit_history_to_width(&memory_history_raw, charts[1].width.saturating_sub(2) as usize);
     let memory = Sparkline::default()
         .block(Block::default().borders(Borders::ALL).title("Memory History (%)"))
         .style(Style::default().fg(Color::LightBlue))
+        .max(100)
+        .absent_value_style(Style::default().fg(Color::DarkGray))
         .data(&memory_history);
     frame.render_widget(memory, charts[1]);
 
@@ -1923,6 +1930,28 @@ fn render_performance_view(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App
         .block(Block::default().borders(Borders::ALL).title("Performance Summary"))
         .wrap(Wrap { trim: false });
     frame.render_widget(summary, sections[1]);
+}
+
+fn fit_history_to_width(samples: &[u64], width: usize) -> Vec<Option<u64>> {
+    let width = width.max(1);
+    if samples.is_empty() {
+        return vec![None; width];
+    }
+    if width == 1 {
+        return vec![samples.last().copied()];
+    }
+    if samples.len() <= width {
+        let mut aligned = vec![None; width - samples.len()];
+        aligned.extend(samples.iter().copied().map(Some));
+        return aligned;
+    }
+    let last_index = samples.len().saturating_sub(1);
+    (0..width)
+        .map(|slot| {
+            let source_index = slot.saturating_mul(last_index) / (width - 1);
+            Some(samples[source_index])
+        })
+        .collect()
 }
 
 fn render_process_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -3044,6 +3073,16 @@ mod tests {
         assert_eq!(samples.len(), 60);
         assert_eq!(samples.front().copied(), Some(10));
         assert_eq!(samples.back().copied(), Some(69));
+    }
+
+    #[test]
+    fn history_resamples_to_requested_width() {
+        let samples = vec![10, 20, 30];
+        assert_eq!(
+            fit_history_to_width(&samples, 5),
+            vec![None, None, Some(10), Some(20), Some(30)]
+        );
+        assert_eq!(fit_history_to_width(&samples, 2), vec![Some(10), Some(30)]);
     }
 
     #[test]
