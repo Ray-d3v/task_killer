@@ -15,11 +15,11 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Sparkline, Table,
-    TableState, Wrap,
+    Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Sparkline,
+    Table, TableState, Wrap,
 };
 use ratatui::Terminal;
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{DiskRefreshKind, Disks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tasktui_core::{
     API_VERSION, AdminCommand, AdminResult, ApiRequest, ProcessPriority, ServiceRow, TasktuiError,
 };
@@ -43,15 +43,17 @@ fn main() -> Result<()> {
 enum ActiveTab {
     Processes,
     Performance,
+    Storage,
     Services,
     Network,
 }
 
 impl ActiveTab {
-    fn titles() -> [Line<'static>; 4] {
+    fn titles() -> [Line<'static>; 5] {
         [
             Line::from("Processes"),
             Line::from("Performance"),
+            Line::from("Storage"),
             Line::from("Services"),
             Line::from("Network"),
         ]
@@ -61,8 +63,9 @@ impl ActiveTab {
         match self {
             Self::Processes => 0,
             Self::Performance => 1,
-            Self::Services => 2,
-            Self::Network => 3,
+            Self::Storage => 2,
+            Self::Services => 3,
+            Self::Network => 4,
         }
     }
 
@@ -70,23 +73,25 @@ impl ActiveTab {
         match index {
             0 => Self::Processes,
             1 => Self::Performance,
-            2 => Self::Services,
+            2 => Self::Storage,
+            3 => Self::Services,
             _ => Self::Network,
         }
     }
 
     fn next(self) -> Self {
-        Self::from_index((self.index() + 1) % 4)
+        Self::from_index((self.index() + 1) % 5)
     }
 
     fn previous(self) -> Self {
-        Self::from_index((self.index() + 3) % 4)
+        Self::from_index((self.index() + 4) % 5)
     }
 
     fn title(self) -> &'static str {
         match self {
             Self::Processes => "Processes",
             Self::Performance => "Performance",
+            Self::Storage => "Storage",
             Self::Services => "Services",
             Self::Network => "Network",
         }
@@ -169,6 +174,20 @@ struct ProcessDetailView {
     cpu_percent: f32,
     memory_bytes: u64,
     runtime_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StorageRow {
+    name: String,
+    mount_point: String,
+    file_system: String,
+    kind: String,
+    total_space: u64,
+    available_space: u64,
+    used_space: u64,
+    usage_percent: u64,
+    read_bytes: u64,
+    written_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -380,8 +399,10 @@ struct GroupedProcessViewState {
 
 struct AppState {
     system: System,
+    disks: Disks,
     process_rows: Vec<ProcessRow>,
     filtered_rows: Vec<ProcessRow>,
+    storage_rows: Vec<StorageRow>,
     service_rows: Vec<ServiceRow>,
     filtered_services: Vec<ServiceRow>,
     network_rows: Vec<NetworkRow>,
@@ -400,6 +421,7 @@ struct AppState {
     overlay: Overlay,
     process_view: ViewState,
     grouped_process_view: GroupedProcessViewState,
+    storage_view: ViewState,
     service_view: ViewState,
     network_view: ViewState,
     priority_cache: HashMap<u32, String>,
@@ -420,8 +442,10 @@ impl AppState {
             system: System::new_with_specifics(
                 RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
             ),
+            disks: Disks::new_with_refreshed_list_specifics(DiskRefreshKind::everything()),
             process_rows: Vec::new(),
             filtered_rows: Vec::new(),
+            storage_rows: Vec::new(),
             service_rows: Vec::new(),
             filtered_services: Vec::new(),
             network_rows: Vec::new(),
@@ -446,6 +470,10 @@ impl AppState {
                 apps_visible_rows: 1,
                 background_visible_rows: 1,
                 ..GroupedProcessViewState::default()
+            },
+            storage_view: ViewState {
+                visible_rows: 1,
+                ..ViewState::default()
             },
             service_view: ViewState {
                 visible_rows: 1,
@@ -529,6 +557,7 @@ impl AppState {
         }
         self.process_rows = rows;
         self.rebuild_process_view();
+        self.refresh_storage_rows();
         self.refresh_network_rows();
         self.summary = SystemSummary {
             cpu_percent: self.system.global_cpu_usage(),
@@ -556,6 +585,45 @@ impl AppState {
         );
         self.refresh_visible_priorities(false);
         self.last_refresh = Instant::now();
+    }
+
+    fn refresh_storage_rows(&mut self) {
+        self.disks.refresh_specifics(true, DiskRefreshKind::everything());
+        self.storage_rows = self
+            .disks
+            .list()
+            .iter()
+            .map(|disk| {
+                let total_space = disk.total_space();
+                let available_space = disk.available_space();
+                let used_space = total_space.saturating_sub(available_space);
+                let usage_percent = if total_space == 0 {
+                    0
+                } else {
+                    used_space.saturating_mul(100) / total_space
+                };
+                let usage = disk.usage();
+                StorageRow {
+                    name: disk.name().to_string_lossy().to_string(),
+                    mount_point: disk.mount_point().display().to_string(),
+                    file_system: disk.file_system().to_string_lossy().to_string(),
+                    kind: format!("{:?}", disk.kind()),
+                    total_space,
+                    available_space,
+                    used_space,
+                    usage_percent,
+                    read_bytes: usage.total_read_bytes,
+                    written_bytes: usage.total_written_bytes,
+                }
+            })
+            .collect();
+        self.storage_rows.sort_by(|left, right| {
+            left.mount_point
+                .to_ascii_lowercase()
+                .cmp(&right.mount_point.to_ascii_lowercase())
+                .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        });
+        self.storage_view.clamp(self.storage_rows.len());
     }
 
     fn refresh_services(&mut self, force: bool) {
@@ -730,6 +798,7 @@ impl AppState {
                     next_process_index(&entries, self.process_view.selected).unwrap_or(self.process_view.selected);
                 self.sync_process_view_state();
             }
+            ActiveTab::Storage => self.storage_view.select_next(self.storage_rows.len()),
             ActiveTab::Services => self.service_view.select_next(self.filtered_services.len()),
             ActiveTab::Network => self.network_view.select_next(self.filtered_network.len()),
             ActiveTab::Performance => {}
@@ -747,6 +816,7 @@ impl AppState {
                     prev_process_index(&entries, self.process_view.selected).unwrap_or(self.process_view.selected);
                 self.sync_process_view_state();
             }
+            ActiveTab::Storage => self.storage_view.select_prev(self.storage_rows.len()),
             ActiveTab::Services => self.service_view.select_prev(self.filtered_services.len()),
             ActiveTab::Network => self.network_view.select_prev(self.filtered_network.len()),
             ActiveTab::Performance => {}
@@ -773,6 +843,10 @@ impl AppState {
 
     fn selected_service(&self) -> Option<&ServiceRow> {
         self.filtered_services.get(self.service_view.selected)
+    }
+
+    fn selected_storage(&self) -> Option<&StorageRow> {
+        self.storage_rows.get(self.storage_view.selected)
     }
 
     fn process_entries(&self) -> Vec<ProcessListEntry> {
@@ -851,7 +925,7 @@ impl AppState {
         match self.active_tab {
             ActiveTab::Processes => self.filtered_rows.get(self.process_view.selected).map(|row| row.pid),
             ActiveTab::Network => self.selected_network().map(|row| row.pid),
-            ActiveTab::Performance | ActiveTab::Services => None,
+            ActiveTab::Performance | ActiveTab::Storage | ActiveTab::Services => None,
         }
     }
 
@@ -888,6 +962,7 @@ impl AppState {
             self.grouped_process_view.apps_visible_rows = apps_list_area.height as usize;
             self.grouped_process_view.background_visible_rows = background_list_area.height as usize;
         }
+        self.storage_view.visible_rows = (body_sections[0].height.saturating_sub(3) as usize).max(1);
         self.service_view.visible_rows = (body_sections[0].height.saturating_sub(3) as usize).max(1);
         let network_sections = network_list_sections(body_sections[0]);
         self.network_view.visible_rows = (network_sections[1].height.saturating_sub(3) as usize).max(1);
@@ -896,6 +971,7 @@ impl AppState {
             .selected
             .min(self.filtered_rows.len().saturating_sub(1));
         self.sync_process_view_state();
+        self.storage_view.clamp(self.storage_rows.len());
         self.service_view.clamp(self.filtered_services.len());
         self.network_view.clamp(self.filtered_network.len());
     }
@@ -1190,7 +1266,7 @@ fn open_context_menu_for_selection(app: &mut AppState) {
                 target: ContextMenuTarget::NetworkPid(pid),
             })
         }),
-        ActiveTab::Performance => None,
+        ActiveTab::Performance | ActiveTab::Storage => None,
     }
     .unwrap_or(Overlay::None);
 }
@@ -1410,6 +1486,10 @@ fn render_root(frame: &mut ratatui::Frame<'_>, app: &AppState) {
             render_process_detail_pane(frame, body_sections[1], app);
         }
         ActiveTab::Performance => render_performance_view(frame, layout[2], app),
+        ActiveTab::Storage => {
+            render_storage_table(frame, body_sections[0], app);
+            render_storage_detail_pane(frame, body_sections[1], app);
+        }
         ActiveTab::Services => {
             render_service_table(frame, body_sections[0], app);
             render_service_detail_pane(frame, body_sections[1], app);
@@ -1825,6 +1905,49 @@ fn render_service_table(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppSta
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+fn render_storage_table(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let visible_rows = area.height.saturating_sub(3) as usize;
+    let (offset, selected_in_view) = visible_window(
+        app.storage_rows.len(),
+        app.storage_view.selected,
+        app.storage_view.offset,
+        visible_rows.max(1),
+    );
+    let rows = app
+        .storage_rows
+        .iter()
+        .skip(offset)
+        .take(visible_rows.max(1))
+        .map(|row| {
+            Row::new(vec![
+                Cell::from(row.mount_point.clone()),
+                Cell::from(format_storage_bytes(row.used_space)),
+                Cell::from(format_storage_bytes(row.available_space)),
+                Cell::from(format!("{}%", row.usage_percent)),
+                Cell::from(row.file_system.clone()),
+            ])
+            .style(storage_usage_style(row.usage_percent))
+        });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(14),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Min(10),
+        ],
+    )
+    .header(
+        Row::new(vec!["Mount", "Used", "Free", "Use%", "FS"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Blue))
+    .block(Block::default().borders(Borders::ALL).title("Storage | drives and volumes"));
+    let mut state = TableState::default().with_selected(selected_in_view);
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
 fn render_network_filter_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let labels = vec![
         filter_chip(NetworkStateFilter::All, app.network_filter),
@@ -1932,24 +2055,65 @@ fn render_performance_view(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App
     frame.render_widget(summary, sections[1]);
 }
 
+fn render_storage_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if let Some(storage) = app.selected_storage() {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(8)])
+            .split(area);
+        let gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Usage"))
+            .gauge_style(storage_usage_style(storage.usage_percent).bg(Color::DarkGray))
+            .percent(storage.usage_percent as u16)
+            .label(format!("{}%", storage.usage_percent));
+        frame.render_widget(gauge, sections[0]);
+
+        let lines = vec![
+            Line::from(format!("Name: {}", storage.name)),
+            Line::from(format!("Mount point: {}", storage.mount_point)),
+            Line::from(format!("File system: {}", storage.file_system)),
+            Line::from(format!("Kind: {}", storage.kind)),
+            Line::from(""),
+            Line::from(format!("Total: {}", format_storage_bytes(storage.total_space))),
+            Line::from(format!("Used: {}", format_storage_bytes(storage.used_space))),
+            Line::from(format!("Free: {}", format_storage_bytes(storage.available_space))),
+            Line::from(""),
+            Line::from(format!("Read bytes: {}", format_storage_bytes(storage.read_bytes))),
+            Line::from(format!("Written bytes: {}", format_storage_bytes(storage.written_bytes))),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title("Storage Detail"))
+                .wrap(Wrap { trim: false }),
+            sections[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("No storage device detected.")
+                .block(Block::default().borders(Borders::ALL).title("Storage Detail")),
+            area,
+        );
+    }
+}
+
 fn fit_history_to_width(samples: &[u64], width: usize) -> Vec<Option<u64>> {
     let width = width.max(1);
-    if samples.is_empty() {
-        return vec![None; width];
-    }
+    let visible_samples = samples.len().min(PERFORMANCE_HISTORY);
+    let mut conceptual = vec![None; PERFORMANCE_HISTORY.saturating_sub(visible_samples)];
+    conceptual.extend(
+        samples[samples.len().saturating_sub(visible_samples)..]
+            .iter()
+            .copied()
+            .map(Some),
+    );
     if width == 1 {
-        return vec![samples.last().copied()];
+        return vec![conceptual.last().copied().flatten()];
     }
-    if samples.len() <= width {
-        let mut aligned = vec![None; width - samples.len()];
-        aligned.extend(samples.iter().copied().map(Some));
-        return aligned;
-    }
-    let last_index = samples.len().saturating_sub(1);
+    let last_index = conceptual.len().saturating_sub(1);
     (0..width)
         .map(|slot| {
             let source_index = slot.saturating_mul(last_index) / (width - 1);
-            Some(samples[source_index])
+            conceptual[source_index]
         })
         .collect()
 }
@@ -2072,6 +2236,11 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         ActiveTab::Performance => vec![
             Line::from("Tab/Shift+Tab switch pages | / search leaves query active for other tabs"),
             Line::from("Performance keeps the last 60 samples of CPU and memory."),
+            Line::from(app.feedback.clone()),
+        ],
+        ActiveTab::Storage => vec![
+            Line::from("Tab/Shift+Tab switch pages | / search leaves query active for other tabs"),
+            Line::from("Storage shows mounted volumes, usage, filesystem, and cumulative read/write bytes."),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Services => vec![
@@ -2337,6 +2506,7 @@ fn rebuild_active_tab(app: &mut AppState) {
     match app.active_tab {
         ActiveTab::Processes => app.rebuild_process_view(),
         ActiveTab::Performance => {}
+        ActiveTab::Storage => {}
         ActiveTab::Services => app.rebuild_service_view(),
         ActiveTab::Network => app.rebuild_network_view(),
     }
@@ -2434,6 +2604,7 @@ fn increment_detail_scroll(app: &mut AppState) {
         ActiveTab::Processes => {
             app.process_detail_scroll = app.process_detail_scroll.saturating_add(1);
         }
+        ActiveTab::Storage => {}
         ActiveTab::Services => {
             app.service_detail_scroll = app.service_detail_scroll.saturating_add(1);
         }
@@ -2449,6 +2620,7 @@ fn decrement_detail_scroll(app: &mut AppState) {
         ActiveTab::Processes => {
             app.process_detail_scroll = app.process_detail_scroll.saturating_sub(1);
         }
+        ActiveTab::Storage => {}
         ActiveTab::Services => {
             app.service_detail_scroll = app.service_detail_scroll.saturating_sub(1);
         }
@@ -2540,6 +2712,16 @@ fn resolve_process_path(pid: u32) -> Result<String> {
 fn format_memory(memory_bytes: u64) -> String {
     const MIB: f64 = 1024.0 * 1024.0;
     format!("{:.1} MiB", memory_bytes as f64 / MIB)
+}
+
+fn format_storage_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const TIB: f64 = GIB * 1024.0;
+    if bytes as f64 >= TIB {
+        format!("{:.1} TiB", bytes as f64 / TIB)
+    } else {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    }
 }
 
 fn format_runtime(runtime_secs: u64) -> String {
@@ -2819,6 +3001,17 @@ fn select_row_at(app: &mut AppState, list_area: Rect, row: u16) {
                 app.sync_process_view_state();
             }
         }
+        ActiveTab::Storage => {
+            if let Some(index) = list_index_at_row(list_area, row, true) {
+                app.storage_view.selected = index.min(app.storage_rows.len().saturating_sub(1));
+                app.storage_view.offset = adjusted_offset(
+                    app.storage_rows.len(),
+                    app.storage_view.selected,
+                    app.storage_view.offset,
+                    app.storage_view.visible_rows.max(1),
+                );
+            }
+        }
         ActiveTab::Services => {
             if let Some(index) = list_index_at_row(list_area, row, true) {
                 app.service_view.selected = index.min(app.filtered_services.len().saturating_sub(1));
@@ -2875,6 +3068,18 @@ fn memory_style(memory_bytes: u64) -> Style {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
+    }
+}
+
+fn storage_usage_style(usage_percent: u64) -> Style {
+    if usage_percent >= 90 {
+        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+    } else if usage_percent >= 75 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if usage_percent >= 50 {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default().fg(Color::LightGreen)
     }
 }
 
@@ -3077,12 +3282,19 @@ mod tests {
 
     #[test]
     fn history_resamples_to_requested_width() {
-        let samples = vec![10, 20, 30];
+        let samples: Vec<u64> = (0..PERFORMANCE_HISTORY as u64).collect();
+        let fitted = fit_history_to_width(&samples, 5);
+        assert_eq!(fitted.len(), 5);
+        assert!(fitted.iter().all(Option::is_some));
+        assert_eq!(fitted.first().copied().flatten(), Some(0));
         assert_eq!(
-            fit_history_to_width(&samples, 5),
-            vec![None, None, Some(10), Some(20), Some(30)]
+            fitted.last().copied().flatten(),
+            Some((PERFORMANCE_HISTORY - 1) as u64)
         );
-        assert_eq!(fit_history_to_width(&samples, 2), vec![Some(10), Some(30)]);
+        assert_eq!(
+            fit_history_to_width(&samples, 2),
+            vec![Some(0), Some((PERFORMANCE_HISTORY - 1) as u64)]
+        );
     }
 
     #[test]
@@ -3134,11 +3346,12 @@ mod tests {
     fn tab_hit_testing_uses_rendered_tab_widths() {
         let area = Rect::new(0, 0, 80, 3);
         let areas = tabs_hit_areas(area);
-        assert_eq!(areas.len(), 4);
+        assert_eq!(areas.len(), 5);
         assert_eq!(tab_at_position(area, areas[0].x), Some(ActiveTab::Processes));
         assert_eq!(tab_at_position(area, areas[1].x), Some(ActiveTab::Performance));
-        assert_eq!(tab_at_position(area, areas[2].x), Some(ActiveTab::Services));
-        assert_eq!(tab_at_position(area, areas[3].x), Some(ActiveTab::Network));
+        assert_eq!(tab_at_position(area, areas[2].x), Some(ActiveTab::Storage));
+        assert_eq!(tab_at_position(area, areas[3].x), Some(ActiveTab::Services));
+        assert_eq!(tab_at_position(area, areas[4].x), Some(ActiveTab::Network));
     }
 
     #[test]
@@ -3322,5 +3535,26 @@ mod tests {
         assert_eq!(next_process_index(&entries, 2), Some(4));
         assert_eq!(next_process_index(&entries, 4), Some(1));
         assert_eq!(prev_process_index(&entries, 1), Some(4));
+    }
+
+    #[test]
+    fn performance_history_starts_right_aligned() {
+        let fitted = fit_history_to_width(&[10, 20, 30], 10);
+        assert_eq!(fitted.len(), 10);
+        assert!(fitted[..9].iter().all(|value| value.is_none()));
+        assert_eq!(fitted[9], Some(30));
+    }
+
+    #[test]
+    fn performance_history_fills_full_width_after_history_window_is_full() {
+        let samples: Vec<u64> = (0..PERFORMANCE_HISTORY as u64).collect();
+        let fitted = fit_history_to_width(&samples, 100);
+        assert_eq!(fitted.len(), 100);
+        assert!(fitted.iter().all(Option::is_some));
+        assert_eq!(fitted.first().copied().flatten(), Some(0));
+        assert_eq!(
+            fitted.last().copied().flatten(),
+            Some((PERFORMANCE_HISTORY - 1) as u64)
+        );
     }
 }
