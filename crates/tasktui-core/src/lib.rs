@@ -55,6 +55,7 @@ pub enum AdminCommand {
     Ping,
     ForceKillProcess { pid: u32 },
     RequestCloseProcess { pid: u32 },
+    RestartProcess { pid: u32 },
     SuspendProcess { pid: u32 },
     ResumeProcess { pid: u32 },
     SetPriority { pid: u32, priority: ProcessPriority },
@@ -68,6 +69,7 @@ pub enum AdminCommand {
 pub enum AdminResult {
     Pong,
     ProcessClosed { pid: u32, forced: bool },
+    ProcessRestarted { pid: u32 },
     ProcessStateChanged { pid: u32, action: ProcessAction },
     ProcessPriorityChanged { pid: u32, priority: ProcessPriority },
     ServiceStateChanged { service_name: String, action: ServiceAction },

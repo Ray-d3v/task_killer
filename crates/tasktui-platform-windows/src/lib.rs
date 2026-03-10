@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use std::net::Ipv4Addr;
 use std::mem::{size_of, zeroed};
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tasktui_core::{
     ApiRequest, ApiResponse, PIPE_NAME, ProcessPriority, ServiceRow, TasktuiError, TcpPortOwner,
@@ -42,9 +44,10 @@ use windows::Win32::System::Services::{
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, IsProcessCritical, OpenProcess, OpenThread,
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
-    GetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, ResumeThread,
-    SetPriorityClass, SuspendThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
+    GetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, QueryFullProcessImageNameW,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    PROCESS_TERMINATE, ResumeThread, SetPriorityClass, SuspendThread, THREAD_SUSPEND_RESUME,
+    TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_STYLE, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
@@ -495,6 +498,18 @@ pub fn force_kill_process(pid: u32) -> Result<()> {
     }
 }
 
+pub fn restart_process(pid: u32) -> Result<()> {
+    if pid == 0 || pid == 4 || pid == unsafe { GetCurrentProcessId() } {
+        return Err(TasktuiError::AccessDenied.into());
+    }
+    let path = query_process_image_path(pid)?;
+    force_kill_process(pid)?;
+    Command::new(&path)
+        .spawn()
+        .with_context(|| format!("restart process from {}", path.display()))?;
+    Ok(())
+}
+
 pub fn suspend_process(pid: u32) -> Result<()> {
     if pid == 0 || pid == 4 || pid == unsafe { GetCurrentProcessId() } {
         return Err(TasktuiError::AccessDenied.into());
@@ -514,6 +529,31 @@ pub fn suspend_process(pid: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn query_process_image_path(pid: u32) -> Result<PathBuf> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .context("open process for image path query")?;
+        let result = (|| {
+            let mut buffer = vec![0u16; 32_768];
+            let mut len = buffer.len() as u32;
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut len,
+            )
+                .context("QueryFullProcessImageNameW")?;
+            let path = String::from_utf16_lossy(&buffer[..len as usize]);
+            if path.is_empty() {
+                return Err(anyhow!("process image path is empty"));
+            }
+            Ok(PathBuf::from(path))
+        })();
+        let _ = CloseHandle(handle);
+        result
+    }
 }
 
 pub fn resume_process(pid: u32) -> Result<()> {

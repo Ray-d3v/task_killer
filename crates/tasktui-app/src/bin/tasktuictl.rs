@@ -35,6 +35,9 @@ fn main() -> Result<()> {
                         println!("requested close for process {pid}");
                     }
                 }
+                Some(AdminResult::ProcessRestarted { pid }) => {
+                    println!("restarted process {pid}");
+                }
                 Some(AdminResult::ProcessStateChanged { pid, action }) => {
                     println!("process {pid} {action}");
                 }
@@ -92,6 +95,9 @@ fn parse_args(args: &[String]) -> Result<ParsedCommand> {
             pid: parse_pid(pid)?,
         })),
         [command, pid] if command == "close-pid" => Ok(ParsedCommand::Admin(AdminCommand::RequestCloseProcess {
+            pid: parse_pid(pid)?,
+        })),
+        [command, pid] if command == "restart-pid" => Ok(ParsedCommand::Admin(AdminCommand::RestartProcess {
             pid: parse_pid(pid)?,
         })),
         [command, pid] if command == "suspend-pid" => Ok(ParsedCommand::Admin(AdminCommand::SuspendProcess {
@@ -153,6 +159,7 @@ fn print_help() {
     println!("  open-path <pid>");
     println!("  close-pid <pid>");
     println!("  kill-pid <pid>");
+    println!("  restart-pid <pid>");
     println!("  suspend-pid <pid>");
     println!("  resume-pid <pid>");
     println!("  set-priority <pid> <idle|below_normal|normal|above_normal|high>");
