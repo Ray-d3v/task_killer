@@ -1657,8 +1657,15 @@ fn render_grouped_process_sections(
     let (apps, background) = app.grouped_process_indexes();
     let (apps_header, apps_list_area, background_header, background_list_area) = grouped_process_sections(area);
 
-    render_process_group_header(frame, apps_header, "Apps", apps.len(), Color::Cyan);
-    render_process_group_header(frame, background_header, "Background", background.len(), Color::DarkGray);
+    render_process_group_header(frame, apps_header, "Apps", apps.len(), Color::Black, Color::Cyan);
+    render_process_group_header(
+        frame,
+        background_header,
+        "Background",
+        background.len(),
+        Color::Black,
+        Color::Yellow,
+    );
     render_process_group_list(
         frame,
         apps_list_area,
@@ -1683,13 +1690,27 @@ fn render_process_group_header(
     area: Rect,
     label: &str,
     count: usize,
+    foreground: Color,
     background: Color,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let header = Paragraph::new(format!("{label} ({count})"))
-        .style(Style::default().fg(Color::Black).bg(background).add_modifier(Modifier::BOLD));
+    let text = format!(" {} ({count}) ", label.to_ascii_uppercase());
+    let mut band = text;
+    let width = area.width as usize;
+    if band.len() < width {
+        band.push_str(&" ".repeat(width - band.len()));
+    } else {
+        band.truncate(width);
+    }
+    let header = Paragraph::new(band)
+        .style(
+            Style::default()
+                .fg(foreground)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_widget(header, area);
 }
 
