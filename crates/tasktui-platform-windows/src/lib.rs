@@ -527,7 +527,10 @@ pub fn resume_process(pid: u32) -> Result<()> {
     for thread_id in thread_ids {
         unsafe {
             let handle = OpenThread(THREAD_SUSPEND_RESUME, false, thread_id).context("open thread")?;
-            let previous = ResumeThread(handle);
+            let mut previous = ResumeThread(handle);
+            while previous != u32::MAX && previous > 1 {
+                previous = ResumeThread(handle);
+            }
             let _ = CloseHandle(handle);
             if previous == u32::MAX {
                 return Err(anyhow!("ResumeThread failed for thread {thread_id}"));

@@ -1072,6 +1072,9 @@ fn handle_key_event(app: &mut AppState, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Tab | KeyCode::Right => app.set_active_tab(app.active_tab.next()),
         KeyCode::BackTab | KeyCode::Left => app.set_active_tab(app.active_tab.previous()),
+        KeyCode::F(10) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            open_context_menu_for_selection(app);
+        }
         KeyCode::Char('/') => app.overlay = Overlay::Search,
         KeyCode::Down => match app.pane_focus {
             PaneFocus::List => app.select_next(),
@@ -1150,6 +1153,35 @@ fn handle_key_event(app: &mut AppState, key: KeyEvent) -> Result<bool> {
         _ => {}
     }
     Ok(false)
+}
+
+fn open_context_menu_for_selection(app: &mut AppState) {
+    app.pane_focus = PaneFocus::List;
+    app.overlay = match app.active_tab {
+        ActiveTab::Processes => app.selected_target_pid().map(|pid| {
+            Overlay::ContextMenu(ContextMenuState {
+                kind: ContextMenuKind::Process,
+                selected_index: 0,
+                target: ContextMenuTarget::ProcessPid(pid),
+            })
+        }),
+        ActiveTab::Services => app.selected_service_name().map(|service_name| {
+            Overlay::ContextMenu(ContextMenuState {
+                kind: ContextMenuKind::Service,
+                selected_index: 0,
+                target: ContextMenuTarget::ServiceName(service_name),
+            })
+        }),
+        ActiveTab::Network => app.selected_target_pid().map(|pid| {
+            Overlay::ContextMenu(ContextMenuState {
+                kind: ContextMenuKind::Network,
+                selected_index: 0,
+                target: ContextMenuTarget::NetworkPid(pid),
+            })
+        }),
+        ActiveTab::Performance => None,
+    }
+    .unwrap_or(Overlay::None);
 }
 
 fn handle_search_key(app: &mut AppState, key: KeyEvent) -> Result<bool> {
@@ -1335,32 +1367,7 @@ fn handle_mouse_event(app: &mut AppState, mouse: MouseEvent, frame_area: Rect) -
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 select_row_at(app, list_area, mouse.row);
-                app.pane_focus = PaneFocus::List;
-                app.overlay = match app.active_tab {
-                    ActiveTab::Processes => app.selected_target_pid().map(|pid| {
-                        Overlay::ContextMenu(ContextMenuState {
-                            kind: ContextMenuKind::Process,
-                            selected_index: 0,
-                            target: ContextMenuTarget::ProcessPid(pid),
-                        })
-                    }),
-                    ActiveTab::Services => app.selected_service_name().map(|service_name| {
-                        Overlay::ContextMenu(ContextMenuState {
-                            kind: ContextMenuKind::Service,
-                            selected_index: 0,
-                            target: ContextMenuTarget::ServiceName(service_name),
-                        })
-                    }),
-                    ActiveTab::Network => app.selected_target_pid().map(|pid| {
-                        Overlay::ContextMenu(ContextMenuState {
-                            kind: ContextMenuKind::Network,
-                            selected_index: 0,
-                            target: ContextMenuTarget::NetworkPid(pid),
-                        })
-                    }),
-                    ActiveTab::Performance => None,
-                }
-                .unwrap_or(Overlay::None);
+                open_context_menu_for_selection(app);
             }
             MouseEventKind::ScrollDown => app.select_next(),
             MouseEventKind::ScrollUp => app.select_prev(),
@@ -1997,7 +2004,7 @@ fn render_network_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let lines = match app.active_tab {
         ActiveTab::Processes => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | s sort/off | t tree | Enter toggle pane focus"),
+            Line::from("Tab/Shift+Tab switch pages | / search | s sort/off | t tree | Enter toggle pane focus | Shift+F10 menu"),
             Line::from("k close | K kill | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],
@@ -2007,12 +2014,12 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Services => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | 1 start | 2 stop | 3 restart"),
+            Line::from("Tab/Shift+Tab switch pages | / search | 1 start | 2 stop | 3 restart | Shift+F10 menu"),
             Line::from("Use right-click for a service context menu."),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Network => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | f state filter | Enter toggle pane focus"),
+            Line::from("Tab/Shift+Tab switch pages | / search | f state filter | Enter toggle pane focus | Shift+F10 menu"),
             Line::from("k close | K kill | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],
@@ -2569,6 +2576,15 @@ fn list_index_at_row(area: Rect, row: u16, has_header: bool) -> Option<usize> {
     }
 }
 
+fn plain_list_index_at_row(area: Rect, row: u16) -> Option<usize> {
+    let content_bottom = area.y.saturating_add(area.height);
+    if row < area.y || row >= content_bottom {
+        None
+    } else {
+        Some((row - area.y) as usize)
+    }
+}
+
 fn tab_at_position(area: Rect, x: u16) -> Option<ActiveTab> {
     for (index, tab_area) in tabs_hit_areas(area).iter().enumerate() {
         if x >= tab_area.x && x < tab_area.x.saturating_add(tab_area.width) {
@@ -2706,13 +2722,13 @@ fn select_row_at(app: &mut AppState, list_area: Rect, row: u16) {
             if !app.process_sort_enabled {
                 let (_, apps_list_area, _, background_list_area) = grouped_process_sections(list_area);
                 let (apps, background) = app.grouped_process_indexes();
-                if let Some(index) = list_index_at_row(apps_list_area, row, false) {
+                if let Some(index) = plain_list_index_at_row(apps_list_area, row) {
                     let visible_index = index.saturating_add(app.grouped_process_view.apps_offset);
                     if let Some(process_index) = apps.get(visible_index) {
                         app.process_view.selected = *process_index;
                         app.sync_process_view_state();
                     }
-                } else if let Some(index) = list_index_at_row(background_list_area, row, false) {
+                } else if let Some(index) = plain_list_index_at_row(background_list_area, row) {
                     let visible_index = index.saturating_add(app.grouped_process_view.background_offset);
                     if let Some(process_index) = background.get(visible_index) {
                         app.process_view.selected = *process_index;
@@ -3128,6 +3144,30 @@ mod tests {
         assert_eq!(background_header.height, 1);
         assert!(apps_list.height > 0);
         assert!(background_list.height > 0);
+    }
+
+    #[test]
+    fn plain_list_index_matches_first_visual_row() {
+        let area = Rect::new(10, 5, 40, 4);
+        assert_eq!(plain_list_index_at_row(area, 5), Some(0));
+        assert_eq!(plain_list_index_at_row(area, 6), Some(1));
+        assert_eq!(plain_list_index_at_row(area, 9), None);
+    }
+
+    #[test]
+    fn shift_f10_opens_process_context_menu_for_selected_row() {
+        let mut app = AppState::new();
+        app.filtered_rows = sample_rows();
+        app.process_view.selected = 1;
+        open_context_menu_for_selection(&mut app);
+        assert!(matches!(
+            app.overlay,
+            Overlay::ContextMenu(ContextMenuState {
+                kind: ContextMenuKind::Process,
+                target: ContextMenuTarget::ProcessPid(11),
+                ..
+            })
+        ));
     }
 
     #[test]
