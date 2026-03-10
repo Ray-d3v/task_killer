@@ -26,7 +26,8 @@ use tasktui_core::{
 use tasktui_platform_windows::{
     force_kill_process, get_process_priority, list_tcp_port_owners, list_windows_services,
     hide_console_title_bar, list_visible_top_level_window_pids, open_path_in_explorer,
-    request_close_process, resume_process, send_request, set_process_priority, suspend_process,
+    request_close_process, restart_process, resume_process, send_request, set_process_priority,
+    suspend_process,
 };
 
 const REFRESH_EVERY: Duration = Duration::from_secs(1);
@@ -257,6 +258,7 @@ enum ContextAction {
     OpenDetails,
     Close,
     ForceKill,
+    Restart,
     Suspend,
     Resume,
     OpenFolder,
@@ -272,6 +274,7 @@ impl ContextAction {
             Self::OpenDetails => "Open details",
             Self::Close => "Close",
             Self::ForceKill => "Force kill",
+            Self::Restart => "Restart",
             Self::Suspend => "Suspend",
             Self::Resume => "Resume",
             Self::OpenFolder => "Open folder",
@@ -287,10 +290,11 @@ impl ContextAction {
     }
 }
 
-const PROCESS_CONTEXT_ACTIONS: [ContextAction; 11] = [
+const PROCESS_CONTEXT_ACTIONS: [ContextAction; 12] = [
     ContextAction::OpenDetails,
     ContextAction::Close,
     ContextAction::ForceKill,
+    ContextAction::Restart,
     ContextAction::Suspend,
     ContextAction::Resume,
     ContextAction::OpenFolder,
@@ -308,10 +312,11 @@ const SERVICE_CONTEXT_ACTIONS: [ContextAction; 4] = [
     ContextAction::RestartService,
 ];
 
-const NETWORK_CONTEXT_ACTIONS: [ContextAction; 11] = [
+const NETWORK_CONTEXT_ACTIONS: [ContextAction; 12] = [
     ContextAction::OpenDetails,
     ContextAction::Close,
     ContextAction::ForceKill,
+    ContextAction::Restart,
     ContextAction::Suspend,
     ContextAction::Resume,
     ContextAction::OpenFolder,
@@ -1119,6 +1124,12 @@ fn handle_key_event(app: &mut AppState, key: KeyEvent) -> Result<bool> {
                 app.feedback = send_admin_command(AdminCommand::RequestCloseProcess { pid })?;
             }
         }
+        KeyCode::Char('r') => {
+            if let Some(pid) = app.selected_target_pid() {
+                app.feedback = send_admin_command(AdminCommand::RestartProcess { pid })?;
+                app.refresh_processes();
+            }
+        }
         KeyCode::Char('K') => {
             if app.selected_target_pid().is_some() {
                 app.overlay = Overlay::ConfirmForceKill;
@@ -1917,7 +1928,7 @@ fn render_process_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
             Line::from(""),
             Line::from(format!("Exe: {}", detail.exe_path)),
             Line::from(""),
-            Line::from("Actions: k close | K kill | z/x suspend-resume | 4-8 priority | o open folder"),
+            Line::from("Actions: k close | K kill | r restart | z/x suspend-resume | 4-8 priority | o open folder"),
         ]
     } else {
         vec![Line::from("No process selected.")]
@@ -1982,7 +1993,7 @@ fn render_network_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
             Line::from(format!("Remote: {}", row.remote_endpoint)),
             Line::from(format!("State: {}", row.state)),
             Line::from(""),
-            Line::from("Actions: k close | K kill | z/x suspend-resume | 4-8 priority | o open folder"),
+            Line::from("Actions: k close | K kill | r restart | z/x suspend-resume | 4-8 priority | o open folder"),
         ]
     } else {
         vec![Line::from("No endpoint selected.")]
@@ -2005,7 +2016,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let lines = match app.active_tab {
         ActiveTab::Processes => vec![
             Line::from("Tab/Shift+Tab switch pages | / search | s sort/off | t tree | Enter toggle pane focus | Shift+F10 menu"),
-            Line::from("k close | K kill | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
+            Line::from("k close | K kill | r restart | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Performance => vec![
@@ -2020,7 +2031,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         ],
         ActiveTab::Network => vec![
             Line::from("Tab/Shift+Tab switch pages | / search | f state filter | Enter toggle pane focus | Shift+F10 menu"),
-            Line::from("k close | K kill | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
+            Line::from("k close | K kill | r restart | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],
     };
@@ -2228,6 +2239,12 @@ fn perform_context_action(
                 app.feedback = send_admin_command(AdminCommand::RequestCloseProcess { pid })?;
             }
         }
+        ContextAction::Restart => {
+            if let Some(pid) = context_target_pid(&state.target) {
+                app.feedback = send_admin_command(AdminCommand::RestartProcess { pid })?;
+                app.refresh_processes();
+            }
+        }
         ContextAction::ForceKill => {
             app.overlay = Overlay::ConfirmForceKill;
         }
@@ -2302,6 +2319,9 @@ fn send_admin_command(command: AdminCommand) -> Result<String> {
                 format!("Close requested for process {pid}.")
             }
         }
+        Some(AdminResult::ProcessRestarted { pid }) => {
+            format!("Process {pid} restarted.")
+        }
         Some(AdminResult::ProcessStateChanged { pid, action }) => {
             format!("Process {pid} {action}.")
         }
@@ -2326,6 +2346,8 @@ fn handle_local_fallback(command: AdminCommand, transport_error: String) -> Stri
     let local_result = match command {
         AdminCommand::RequestCloseProcess { pid } => request_close_process(pid)
             .map(|_| format!("Close requested for process {pid}. (local fallback)")),
+        AdminCommand::RestartProcess { pid } => restart_process(pid)
+            .map(|_| format!("Process {pid} restarted. (local fallback)")),
         AdminCommand::ForceKillProcess { pid } => force_kill_process(pid)
             .map(|_| format!("Process {pid} terminated. (local fallback)")),
         AdminCommand::SuspendProcess { pid } => suspend_process(pid)

@@ -10,7 +10,7 @@ use tasktui_core::{
 };
 use tasktui_platform_windows::{
     connect_to_pipe, create_secure_named_pipe, force_kill_process, read_pipe_request,
-    request_close_process, restart_windows_service, resume_process, set_process_priority,
+    request_close_process, restart_process, restart_windows_service, resume_process, set_process_priority,
     start_windows_service, stop_windows_service, suspend_process, write_pipe_message,
 };
 use windows::Win32::Foundation::HANDLE;
@@ -157,6 +157,10 @@ pub fn dispatch_command(command: &AdminCommand) -> Result<AdminResult, TasktuiEr
         AdminCommand::RequestCloseProcess { pid } => {
             request_close_process(*pid).map_err(map_anyhow)?;
             Ok(AdminResult::ProcessClosed { pid: *pid, forced: false })
+        }
+        AdminCommand::RestartProcess { pid } => {
+            restart_process(*pid).map_err(map_anyhow)?;
+            Ok(AdminResult::ProcessRestarted { pid: *pid })
         }
         AdminCommand::SuspendProcess { pid } => {
             suspend_process(*pid).map_err(map_anyhow)?;

@@ -126,6 +126,7 @@ Available helper commands:
 - `open-path <pid>`
 - `close-pid <pid>`
 - `kill-pid <pid>`
+- `restart-pid <pid>`
 - `suspend-pid <pid>`
 - `resume-pid <pid>`
 - `set-priority <pid> <idle|below_normal|normal|above_normal|high>`
@@ -144,6 +145,7 @@ Available helper commands:
 - `o` open the executable folder for the selected process or network owner
 - `z` suspend the selected process
 - `x` resume the selected process
+- `r` restart the selected process
 - `4/5/6/7/8` open priority confirmation for idle, below_normal, normal, above_normal, high
 - `Up` / `Down` move selection
 - `k` request graceful close
@@ -171,6 +173,7 @@ Allowed administrative commands:
 - `Ping`
 - `ForceKillProcess { pid }`
 - `RequestCloseProcess { pid }`
+- `RestartProcess { pid }`
 - `SuspendProcess { pid }`
 - `ResumeProcess { pid }`
 - `SetPriority { pid, priority }`
