@@ -1,0 +1,12 @@
+[package]
+name = "tasktui-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tasktui-core = { path = "../tasktui-core" }
+tasktui-platform-windows = { path = "../tasktui-platform-windows" }
+windows.workspace = true
+windows-service.workspace = true
