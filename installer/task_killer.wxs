@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Task Killer"
+    Manufacturer="Ray-d3v"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="EFA61E1C-7802-4244-A1ED-15CF6E2B3072"
+    InstallerVersion="500"
+    Scope="perMachine"
+    Language="1033">
+    <SummaryInformation Description="Task Killer Windows installer" Manufacturer="Ray-d3v" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Task Killer is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Task Killer">
+        <Component Id="TasktuiAppComponent" Guid="*">
+          <File Id="TasktuiAppFile" Source="target\release\tasktui-app.exe" KeyPath="yes" />
+        </Component>
+
+        <Component Id="TasktuiCtlComponent" Guid="*">
+          <File Id="TasktuiCtlFile" Source="target\release\tasktuictl.exe" KeyPath="yes" />
+        </Component>
+
+        <Component Id="ReadmeComponent" Guid="*">
+          <File Id="ReadmeFile" Source="README.md" KeyPath="yes" Name="README.txt" />
+        </Component>
+
+        <Component Id="ServiceComponent" Guid="*">
+          <File Id="TasktuiServiceFile" Source="target\release\tasktui-service.exe" KeyPath="yes" />
+          <ServiceInstall
+            Id="TasktuiServiceInstaller"
+            Name="tasktui-service"
+            DisplayName="tasktui-service"
+            Description="tasktui privileged backend service"
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Account="LocalSystem"
+            Vital="yes" />
+          <ServiceControl
+            Id="TasktuiServiceControl"
+            Name="tasktui-service"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Task Killer">
+        <Component Id="ProgramMenuShortcutComponent" Guid="*">
+          <Shortcut
+            Id="TaskKillerStartMenuShortcut"
+            Name="Task Killer"
+            Description="Open Task Killer"
+            Target="[INSTALLFOLDER]tasktui-app.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="ApplicationProgramsFolderRemove" Directory="ApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="Software\Ray-d3v\TaskKiller" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Task Killer" Level="1">
+      <ComponentRef Id="TasktuiAppComponent" />
+      <ComponentRef Id="TasktuiCtlComponent" />
+      <ComponentRef Id="ReadmeComponent" />
+      <ComponentRef Id="ServiceComponent" />
+      <ComponentRef Id="ProgramMenuShortcutComponent" />
+    </Feature>
+  </Package>
+</Wix>
