@@ -69,7 +69,7 @@ pub enum AdminCommand {
 pub enum AdminResult {
     Pong,
     ProcessClosed { pid: u32, forced: bool },
-    ProcessRestarted { pid: u32 },
+    ProcessRestarted { old_pid: u32, new_pid: u32 },
     ProcessStateChanged { pid: u32, action: ProcessAction },
     ProcessPriorityChanged { pid: u32, priority: ProcessPriority },
     ServiceStateChanged { service_name: String, action: ServiceAction },
@@ -192,5 +192,22 @@ mod tests {
     fn validates_service_names() {
         assert!(validate_service_name("Spooler").is_ok());
         assert_eq!(validate_service_name("bad name").expect_err("must reject"), TasktuiError::InvalidServiceName);
+    }
+
+    #[test]
+    fn restarted_result_roundtrip_includes_old_and_new_pid() {
+        let json = serde_json::to_string(&AdminResult::ProcessRestarted {
+            old_pid: 42,
+            new_pid: 84,
+        })
+        .expect("serialize result");
+        let parsed: AdminResult = serde_json::from_str(&json).expect("deserialize result");
+        assert_eq!(
+            parsed,
+            AdminResult::ProcessRestarted {
+                old_pid: 42,
+                new_pid: 84,
+            }
+        );
     }
 }

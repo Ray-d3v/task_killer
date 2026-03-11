@@ -4,12 +4,17 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tasktui_core::{API_VERSION, AdminCommand, AdminResult, ApiRequest, ProcessPriority, TasktuiError};
-use tasktui_platform_windows::{list_tcp_port_owners, open_path_in_explorer, send_request};
+use tasktui_platform_windows::{list_tcp_port_owners, open_path_in_explorer, restart_process, send_request};
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
         ParsedCommand::Admin(command) => {
+            if let AdminCommand::RestartProcess { pid } = command {
+                let new_pid = restart_process(pid)?;
+                println!("restarted process {pid} as {new_pid}");
+                return Ok(());
+            }
             let request = ApiRequest {
                 request_id: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -35,8 +40,8 @@ fn main() -> Result<()> {
                         println!("requested close for process {pid}");
                     }
                 }
-                Some(AdminResult::ProcessRestarted { pid }) => {
-                    println!("restarted process {pid}");
+                Some(AdminResult::ProcessRestarted { old_pid, new_pid }) => {
+                    println!("restarted process {old_pid} as {new_pid}");
                 }
                 Some(AdminResult::ProcessStateChanged { pid, action }) => {
                     println!("process {pid} {action}");

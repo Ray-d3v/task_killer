@@ -1,2 +1,2 @@
-e5ec808c2f88e430e87c908c587a6a22eb42f8b1e6386f03765a60fa9f3b0c0a *task_killer-0.1.0-x64-portable.zip
-be2112467c3cdeda0b86df0a114349eda67b2036bfc1664a2265b7afccc47ace *task_killer-0.1.0-x64.msi
+d1d690dd1df6d1c430a69c19b4a79eac54921bc853b7014b52fc1e5f8accd44b *task_killer-0.1.0-x64-portable.zip
+8089beedd72cb7922966fc40dbbf462f5bd1b9fdaab96773ac455bad2d4ba4f5 *task_killer-0.1.0-x64.msi

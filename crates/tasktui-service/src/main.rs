@@ -159,8 +159,11 @@ pub fn dispatch_command(command: &AdminCommand) -> Result<AdminResult, TasktuiEr
             Ok(AdminResult::ProcessClosed { pid: *pid, forced: false })
         }
         AdminCommand::RestartProcess { pid } => {
-            restart_process(*pid).map_err(map_anyhow)?;
-            Ok(AdminResult::ProcessRestarted { pid: *pid })
+            let new_pid = restart_process(*pid).map_err(map_anyhow)?;
+            Ok(AdminResult::ProcessRestarted {
+                old_pid: *pid,
+                new_pid,
+            })
         }
         AdminCommand::SuspendProcess { pid } => {
             suspend_process(*pid).map_err(map_anyhow)?;
