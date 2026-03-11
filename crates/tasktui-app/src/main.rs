@@ -2513,6 +2513,11 @@ fn rebuild_active_tab(app: &mut AppState) {
 }
 
 fn send_admin_command(command: AdminCommand) -> Result<String> {
+    if let AdminCommand::RestartProcess { pid } = command {
+        return restart_process(pid)
+            .map(|new_pid| format!("Process {pid} restarted as {new_pid}. (local)"));
+    }
+
     let request = ApiRequest {
         request_id: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2539,8 +2544,8 @@ fn send_admin_command(command: AdminCommand) -> Result<String> {
                 format!("Close requested for process {pid}.")
             }
         }
-        Some(AdminResult::ProcessRestarted { pid }) => {
-            format!("Process {pid} restarted.")
+        Some(AdminResult::ProcessRestarted { old_pid, new_pid }) => {
+            format!("Process {old_pid} restarted as {new_pid}.")
         }
         Some(AdminResult::ProcessStateChanged { pid, action }) => {
             format!("Process {pid} {action}.")
@@ -2567,7 +2572,7 @@ fn handle_local_fallback(command: AdminCommand, transport_error: String) -> Stri
         AdminCommand::RequestCloseProcess { pid } => request_close_process(pid)
             .map(|_| format!("Close requested for process {pid}. (local fallback)")),
         AdminCommand::RestartProcess { pid } => restart_process(pid)
-            .map(|_| format!("Process {pid} restarted. (local fallback)")),
+            .map(|new_pid| format!("Process {pid} restarted as {new_pid}. (local fallback)")),
         AdminCommand::ForceKillProcess { pid } => force_kill_process(pid)
             .map(|_| format!("Process {pid} terminated. (local fallback)")),
         AdminCommand::SuspendProcess { pid } => suspend_process(pid)

@@ -2,29 +2,40 @@ use anyhow::{Context, Result, anyhow};
 use std::net::Ipv4Addr;
 use std::mem::{size_of, zeroed};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{Duration, Instant};
+use serde::Deserialize;
 use tasktui_core::{
     ApiRequest, ApiResponse, PIPE_NAME, ProcessPriority, ServiceRow, TasktuiError, TcpPortOwner,
 };
+use wmi::WMIConnection;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, GetLastError, HLOCAL,
-    HANDLE, HWND, LPARAM, LocalFree,
+    APPMODEL_ERROR_NO_APPLICATION, CloseHandle, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GetLastError, HLOCAL, HWND, LPARAM, LocalFree,
+    RPC_E_CHANGED_MODE, HANDLE,
 };
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
 };
 use windows::Win32::Networking::WinSock::AF_INET;
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::Security::{
+    DuplicateTokenEx, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SecurityImpersonation,
+    TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_NONE,
     OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::System::Console::GetConsoleWindow;
+use windows::Win32::System::Com::{
+    CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -42,12 +53,13 @@ use windows::Win32::System::Services::{
     StartServiceW,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, IsProcessCritical, OpenProcess, OpenThread,
+    CreateProcessAsUserW, GetCurrentProcessId, IsProcessCritical, OpenProcess, OpenProcessToken,
+    OpenThread, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
     ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
     GetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, QueryFullProcessImageNameW,
     PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
-    PROCESS_TERMINATE, ResumeThread, SetPriorityClass, SuspendThread, THREAD_SUSPEND_RESUME,
-    TerminateProcess, WaitForSingleObject,
+    PROCESS_TERMINATE, ResumeThread, STARTUPINFOW, SetPriorityClass, SuspendThread,
+    THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_STYLE, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
@@ -56,10 +68,42 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CLOSE, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::core::{BOOL, PCWSTR, w};
+use windows::Win32::UI::Shell::{
+    AO_NONE, ACTIVATEOPTIONS, IApplicationActivationManager,
+};
+use windows::core::{BOOL, GUID, PCWSTR, PWSTR, w};
 
 const PIPE_TIMEOUT_MS: u32 = 5_000;
 const SECURITY_DESCRIPTOR_SDDL: PCWSTR = w!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)");
+const INTERACTIVE_DESKTOP: PCWSTR = w!("winsta0\\default");
+const CLSID_APPLICATION_ACTIVATION_MANAGER: GUID =
+    GUID::from_u128(0x45ba127d_10a8_46ea_8ab7_56ea9078943c);
+
+#[derive(Debug)]
+struct RestartSpec {
+    exe_path: PathBuf,
+    command_line: String,
+    current_directory: PathBuf,
+    user_token: HANDLE,
+    environment_block: *mut core::ffi::c_void,
+}
+
+impl Drop for RestartSpec {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.environment_block.is_null() {
+                let _ = DestroyEnvironmentBlock(self.environment_block);
+            }
+            let _ = CloseHandle(self.user_token);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct Win32ProcessCommandLine {
+    CommandLine: Option<String>,
+}
 
 pub struct NamedPipeServer {
     handle: HANDLE,
@@ -498,16 +542,17 @@ pub fn force_kill_process(pid: u32) -> Result<()> {
     }
 }
 
-pub fn restart_process(pid: u32) -> Result<()> {
+pub fn restart_process(pid: u32) -> Result<u32> {
     if pid == 0 || pid == 4 || pid == unsafe { GetCurrentProcessId() } {
         return Err(TasktuiError::AccessDenied.into());
     }
-    let path = query_process_image_path(pid)?;
+    if let Some(aumid) = query_process_aumid(pid)? {
+        force_kill_process(pid)?;
+        return activate_packaged_application(&aumid);
+    }
+    let spec = build_restart_spec(pid)?;
     force_kill_process(pid)?;
-    Command::new(&path)
-        .spawn()
-        .with_context(|| format!("restart process from {}", path.display()))?;
-    Ok(())
+    launch_process_as_user(spec)
 }
 
 pub fn suspend_process(pid: u32) -> Result<()> {
@@ -553,6 +598,215 @@ fn query_process_image_path(pid: u32) -> Result<PathBuf> {
         })();
         let _ = CloseHandle(handle);
         result
+    }
+}
+
+fn build_restart_spec(pid: u32) -> Result<RestartSpec> {
+    let exe_path = query_process_image_path(pid)?;
+    if !exe_path.is_file() {
+        return Err(TasktuiError::Message("restart metadata unavailable".into()).into());
+    }
+    let command_line = query_process_command_line(pid)?;
+    if command_line.trim().is_empty() {
+        return Err(TasktuiError::Message("command line unavailable".into()).into());
+    }
+    let current_directory = default_restart_directory(&exe_path)?;
+    let user_token = duplicate_primary_token_for_pid(pid)?;
+    let environment_block = create_restart_environment(user_token)?;
+    Ok(RestartSpec {
+        exe_path,
+        command_line,
+        current_directory,
+        user_token,
+        environment_block,
+    })
+}
+
+fn default_restart_directory(exe_path: &std::path::Path) -> Result<PathBuf> {
+    let current_directory = exe_path
+        .parent()
+        .filter(|path| path.exists())
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| TasktuiError::Message("restart metadata unavailable".into()))?;
+    Ok(current_directory)
+}
+
+fn query_process_command_line(pid: u32) -> Result<String> {
+    let connection = WMIConnection::new().context("open WMI connection")?;
+    let query = format!(
+        "SELECT CommandLine FROM Win32_Process WHERE ProcessId = {}",
+        pid
+    );
+    let mut results: Vec<Win32ProcessCommandLine> = connection
+        .raw_query(&query)
+        .context("query process command line")?;
+    let command_line = results
+        .pop()
+        .and_then(|row| row.CommandLine)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| TasktuiError::Message("command line unavailable".into()))?;
+    Ok(command_line)
+}
+
+fn query_process_aumid(pid: u32) -> Result<Option<String>> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .context("open process for aumid query")?;
+        let result = (|| {
+            let mut length = 0u32;
+            let status = GetApplicationUserModelId(handle, &mut length, None);
+            if status == APPMODEL_ERROR_NO_APPLICATION {
+                return Ok(None);
+            }
+            if status != ERROR_INSUFFICIENT_BUFFER {
+                return Err(anyhow!("GetApplicationUserModelId sizing failed with {}", status.0));
+            }
+
+            let mut buffer = vec![0u16; length as usize];
+            let status = GetApplicationUserModelId(handle, &mut length, Some(PWSTR(buffer.as_mut_ptr())));
+            if status == APPMODEL_ERROR_NO_APPLICATION {
+                return Ok(None);
+            }
+            if status.0 != 0 {
+                return Err(anyhow!("GetApplicationUserModelId failed with {}", status.0));
+            }
+            let used = length.saturating_sub(1) as usize;
+            let aumid = String::from_utf16_lossy(&buffer[..used]);
+            if aumid.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(aumid))
+            }
+        })();
+        let _ = CloseHandle(handle);
+        result
+    }
+}
+
+fn duplicate_primary_token_for_pid(pid: u32) -> Result<HANDLE> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .context("open process for token")?;
+        let result = (|| {
+            let mut token = HANDLE::default();
+            OpenProcessToken(
+                process,
+                TOKEN_DUPLICATE
+                    | TOKEN_ASSIGN_PRIMARY
+                    | TOKEN_QUERY
+                    | TOKEN_ADJUST_DEFAULT
+                    | TOKEN_ADJUST_SESSIONID,
+                &mut token,
+            )
+            .context("OpenProcessToken")?;
+
+            let duplicate_result = (|| {
+                let mut primary = HANDLE::default();
+                DuplicateTokenEx(
+                    token,
+                    TOKEN_ACCESS_MASK(
+                        (TOKEN_DUPLICATE
+                            | TOKEN_ASSIGN_PRIMARY
+                            | TOKEN_QUERY
+                            | TOKEN_ADJUST_DEFAULT
+                            | TOKEN_ADJUST_SESSIONID)
+                            .0,
+                    ),
+                    None,
+                    SecurityImpersonation,
+                    TokenPrimary,
+                    &mut primary,
+                )
+                .context("DuplicateTokenEx")?;
+                Ok(primary)
+            })();
+            let _ = CloseHandle(token);
+            duplicate_result
+        })();
+        let _ = CloseHandle(process);
+        result
+    }
+}
+
+fn create_restart_environment(user_token: HANDLE) -> Result<*mut core::ffi::c_void> {
+    unsafe {
+        let mut environment = std::ptr::null_mut();
+        CreateEnvironmentBlock(&mut environment, Some(user_token), false)
+            .context("CreateEnvironmentBlock")?;
+        Ok(environment)
+    }
+}
+
+fn launch_process_as_user(spec: RestartSpec) -> Result<u32> {
+    let exe_wide: Vec<u16> = spec
+        .exe_path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let cwd_wide: Vec<u16> = spec
+        .current_directory
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut command_line_wide: Vec<u16> = spec.command_line.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let startup_info = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(INTERACTIVE_DESKTOP.0 as *mut _),
+            ..Default::default()
+        };
+        let mut process_information = PROCESS_INFORMATION::default();
+        CreateProcessAsUserW(
+            Some(spec.user_token),
+            PCWSTR(exe_wide.as_ptr()),
+            Some(PWSTR(command_line_wide.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_UNICODE_ENVIRONMENT,
+            Some(spec.environment_block),
+            PCWSTR(cwd_wide.as_ptr()),
+            &startup_info,
+            &mut process_information,
+        )
+        .map_err(|error| anyhow!(error).context("interactive relaunch failed"))?;
+        let new_pid = process_information.dwProcessId;
+        let _ = CloseHandle(process_information.hThread);
+        let _ = CloseHandle(process_information.hProcess);
+        Ok(new_pid)
+    }
+}
+
+fn activate_packaged_application(aumid: &str) -> Result<u32> {
+    unsafe {
+        let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let initialized = init.is_ok();
+        if let Err(error) = init.ok()
+            && error.code() != RPC_E_CHANGED_MODE
+        {
+            return Err(anyhow!(error)).context("CoInitializeEx");
+        }
+
+        let activation_manager: IApplicationActivationManager =
+            CoCreateInstance(&CLSID_APPLICATION_ACTIVATION_MANAGER, None, CLSCTX_LOCAL_SERVER)
+                .context("CoCreateInstance(ApplicationActivationManager)")?;
+        let aumid_wide = to_utf16_null(aumid);
+        let result = activation_manager
+            .ActivateApplication(
+                PCWSTR(aumid_wide.as_ptr()),
+                PCWSTR::null(),
+                ACTIVATEOPTIONS(AO_NONE.0),
+            )
+            .map_err(|error| anyhow!(error).context("ActivateApplication"))?;
+        if initialized {
+            CoUninitialize();
+        }
+        Ok(result)
     }
 }
 
@@ -838,5 +1092,25 @@ fn wait_for_service_state(
             return Err(TasktuiError::Timeout.into());
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_directory_uses_executable_parent() {
+        let base = std::env::temp_dir();
+        let exe = base.join("tasktui-app.exe");
+        let dir = default_restart_directory(&exe).expect("derive restart directory");
+        assert_eq!(dir, base);
+    }
+
+    #[test]
+    fn restart_directory_rejects_missing_parent() {
+        let exe = PathBuf::from("tasktui-app.exe");
+        let error = default_restart_directory(&exe).expect_err("must reject");
+        assert!(error.to_string().contains("restart metadata unavailable"));
     }
 }

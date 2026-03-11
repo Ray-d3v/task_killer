@@ -2,6 +2,8 @@
 
 Windows task-management TUI MVP with privilege separation.
 
+日本語版は、この英語版 README の後ろにあります。
+
 The project uses a normal-user TUI plus a privileged Windows Service connected through a local Named Pipe. Display and filtering stay in the TUI. Administrative actions are delegated to the service.
 
 ## Workspace
@@ -244,6 +246,261 @@ Allowed administrative commands:
 - Performance view currently tracks only whole-system CPU and memory
 
 ## References
+
+- [How User Account Control works](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/how-it-works)
+- [Named Pipe security and access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+- [ControlService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-controlservice)
+- [Process Security and Access Rights](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)
+- [ShellExecuteW](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shellexecutew)
+
+---
+
+# task_killer
+
+権限分離を前提にした Windows 向けタスク管理 TUI の MVP です。
+
+このプロジェクトは、通常ユーザー権限で動作する TUI と、ローカル Named Pipe で接続された特権 Windows Service で構成されています。表示やフィルタリングは TUI 側で行い、管理者権限が必要な操作はサービス側へ委譲します。
+
+## ワークスペース構成
+
+- `crates/tasktui-app`
+  - `ratatui` ベースの TUI と補助 CLI バイナリ
+- `crates/tasktui-core`
+  - 共有 IPC 型、API バージョン、エラー定義
+- `crates/tasktui-platform-windows`
+  - Win32、SCM、shell、Named Pipe のラッパー
+- `crates/tasktui-service`
+  - 特権 Windows Service バックエンド
+
+## 機能
+
+- マルチタブの Task Manager 風レイアウト
+- `Processes`、`Performance`、`Storage`、`Services`、`Network` ビュー
+- 検索とフィルタリング
+- CPU、メモリ、PID、名前でのソート
+- CPU とメモリの高負荷行ハイライト
+- プロセスツリー表示
+- プロセス名付き TCP ポート所有者一覧
+- 状態と開始種別を確認できるサービスブラウザ
+- サマリーカードと CPU / メモリ履歴スパークライン
+- プロセス、サービス、ネットワーク操作向け右クリックコンテキストメニュー
+- タブごとに詳細ペイン状態を保持
+- 通常終了要求
+- 強制終了
+- 一時停止と再開
+- 優先度変更
+- Windows サービスの開始、停止、再起動
+- 選択した実行ファイルのフォルダを開く
+
+## 要件
+
+- Windows 10 または Windows 11 x64
+- Rust ツールチェーン
+- サービスインストール時に 1 回だけ管理者権限が必要
+
+## ビルド
+
+```powershell
+cargo build --release
+```
+
+生成物:
+
+- `target/release/tasktui-app.exe`
+- `target/release/tasktui-service.exe`
+- `target/release/tasktuictl.exe`
+
+本番配布用フォルダを作る場合:
+
+```powershell
+.\scripts\build-release.ps1
+```
+
+出力先:
+
+- `dist/tasktui-app.exe`
+- `dist/tasktui-service.exe`
+- `dist/tasktuictl.exe`
+- `dist/README.txt`
+
+## MSI インストーラーのビルド
+
+最初に WiX Toolset をインストールします:
+
+```powershell
+dotnet tool install --global wix
+```
+
+その後、本番向けインストーラーをビルドします:
+
+```powershell
+.\scripts\build-installer.ps1
+```
+
+出力先:
+
+- `dist/task_killer-<version>-x64.msi`
+
+MSI は TUI バイナリを `Program Files\Task Killer` にインストールし、スタートメニューショートカットを作成し、`tasktui-service` を自動起動の `LocalSystem` サービスとして登録します。
+
+## GitHub リリース用アセットの作成
+
+MSI とポータブル zip をまとめて作成し、その後 SHA-256 チェックサムを生成します:
+
+```powershell
+.\scripts\package-github-release.ps1
+```
+
+出力先:
+
+- `dist/task_killer-<version>-x64-portable.zip`
+- `dist/task_killer-<version>-x64.msi`
+- `dist/SHA256SUMS.txt`
+
+## チェック
+
+```powershell
+cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+## サービスのインストール
+
+管理者権限の PowerShell で実行します:
+
+```powershell
+.\scripts\install-service.ps1
+```
+
+削除する場合:
+
+```powershell
+.\scripts\uninstall-service.ps1
+```
+
+## TUI の起動
+
+サービスインストール後に実行します:
+
+```powershell
+.\target\release\tasktui-app.exe
+```
+
+MSI 経由でインストールした場合は、スタートメニューから `Task Killer` を起動するか、次を実行します:
+
+```powershell
+"$env:ProgramFiles\Task Killer\tasktui-app.exe"
+```
+
+起動時に TUI は `Ping` を送信し、サービスへの到達性をステータス領域に表示します。
+また、クラシックなコンソールウィンドウから直接起動した場合は、ネイティブのタイトルバーも非表示にします。Windows Terminal のようなホスト側 UI までは除去しません。
+
+## ローカルサービスデバッグ
+
+SCM を介さずにバックエンドをフォアグラウンドで起動します:
+
+```powershell
+.\scripts\run-service-console.ps1
+```
+
+または直接実行します:
+
+```powershell
+.\target\debug\tasktui-service.exe --console
+```
+
+サービス CLI のヘルプは `--help` を使います:
+
+```powershell
+cargo run -p tasktui-service -- --help
+```
+
+## IPC スモークテスト
+
+TUI を開かずに補助 CLI を使います:
+
+```powershell
+cargo run -p tasktui-app --bin tasktuictl -- ping
+```
+
+または:
+
+```powershell
+.\scripts\smoke-ping.ps1
+```
+
+利用可能な補助コマンド:
+
+- `ping`
+- `list-ports`
+- `open-path <pid>`
+- `close-pid <pid>`
+- `kill-pid <pid>`
+- `restart-pid <pid>`
+- `suspend-pid <pid>`
+- `resume-pid <pid>`
+- `set-priority <pid> <idle|below_normal|normal|above_normal|high>`
+- `start-service <service_name>`
+- `stop-service <service_name>`
+- `restart-service <service_name> [timeout_ms]`
+
+## TUI キーバインド
+
+- `Tab` / `Shift+Tab` で `Processes`、`Performance`、`Storage`、`Services`、`Network` を切り替え
+- `/` で現在アクティブなリストタブを検索
+- `s` でプロセスのソートモードを切り替え
+- `t` でプロセスツリー表示を切り替え
+- `f` でネットワーク状態フィルタを切り替え
+- `Enter` で `Processes`、`Services`、`Network` のリスト / 詳細ペインのフォーカスを切り替え
+- `o` で選択中プロセスまたはネットワーク所有者の実行ファイルフォルダを開く
+- `z` で選択中プロセスを一時停止
+- `x` で選択中プロセスを再開
+- `r` で選択中プロセスを再起動
+- `4/5/6/7/8` で idle、below_normal、normal、above_normal、high の優先度確認を開く
+- `Up` / `Down` で選択移動
+- `k` で通常終了要求
+- `K` で強制終了確認を開く
+- `1` で選択中サービスを開始
+- `2` で選択中サービスを停止
+- `3` で選択中サービスを再起動
+- `q` で終了
+- `Y` / `N` で強制終了とサービス操作を確定またはキャンセル
+- マウス:
+  - 左クリックで行とタブを選択
+  - 右クリックでコンテキストメニューを開く
+  - ホイールスクロールで現在の選択を移動
+  - コンテキストメニュー表示中は閉じるまで背後の入力を受け付けない
+
+## IPC 契約
+
+- パイプ: `\\.\pipe\tasktui.v1`
+- エンコーディング: UTF-8 JSON
+- リクエスト: `ApiRequest { request_id, version, command }`
+- レスポンス: `ApiResponse { request_id, ok, result, error }`
+
+許可される管理コマンド:
+
+- `Ping`
+- `ForceKillProcess { pid }`
+- `RequestCloseProcess { pid }`
+- `RestartProcess { pid }`
+- `SuspendProcess { pid }`
+- `ResumeProcess { pid }`
+- `SetPriority { pid, priority }`
+- `StartService { service_name }`
+- `StopService { service_name }`
+- `RestartService { service_name, timeout_ms }`
+
+## 現在の制限事項
+
+- 一般的なプロセス再起動はベストエフォートです
+  - 同じ実行ファイルパスの再起動は行いますが、元の引数や作業ディレクトリまでは完全に復元しません
+- `watch`、自動再起動ルール、`kill-port`、ダンプ取得は未実装です
+- 保護されたプロセスや保護されたサービスには引き続きアクセスできない場合があります
+- `RequestCloseProcess` は閉じられるトップレベルウィンドウを持つプロセスでのみ機能します
+- Performance ビューは現在、システム全体の CPU とメモリのみを追跡します
+
+## 参考資料
 
 - [How User Account Control works](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/how-it-works)
 - [Named Pipe security and access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
