@@ -1,4 +1,6 @@
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -18,15 +20,19 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWDEFAULT;
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOWDEFAULT};
 use windows::core::{PCWSTR, w};
 
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error:#}");
+            let details = format!("{error:#}");
+            eprintln!("{details}");
+            write_updater_log("ERROR", &details);
+            show_error_dialog(&details);
             ExitCode::FAILURE
         }
     }
@@ -54,13 +60,13 @@ fn run() -> Result<()> {
 fn run_check(current: &Version) -> Result<()> {
     match check_for_updates_for_repo(GITHUB_REPO, current)? {
         UpdateCheck::UpToDate { current } => {
-            println!("Task Killer {current} is already up to date.");
+            log_info(&format!("Task Killer {current} is already up to date."));
         }
         UpdateCheck::UpdateAvailable { current, release } => {
-            println!(
+            log_info(&format!(
                 "Update available: {current} -> {} ({})",
                 release.version, release.msi_asset_name
-            );
+            ));
         }
     }
     Ok(())
@@ -74,32 +80,32 @@ fn run_install(
 ) -> Result<()> {
     let release = match check_for_updates_for_repo(GITHUB_REPO, current)? {
         UpdateCheck::UpToDate { current } => {
-            println!("Task Killer {current} is already up to date.");
+            log_info(&format!("Task Killer {current} is already up to date."));
             return Ok(());
         }
         UpdateCheck::UpdateAvailable { release, .. } => release,
     };
 
-    println!("Downloading Task Killer {}...", release.version);
+    log_info(&format!("Downloading Task Killer {}...", release.version));
     let downloaded = download_release_artifacts(&release)?;
 
     if let Some(pid) = wait_pid {
-        println!("Waiting for tasktui-app.exe to exit...");
+        log_info("Waiting for tasktui-app.exe to exit...");
         wait_for_pid_exit(pid, Duration::from_secs(30))?;
     }
 
-    println!("Stopping service {}...", service_name);
+    log_info(&format!("Stopping service {}...", service_name));
     ensure_service_stopped(service_name)?;
 
-    println!("Launching MSI installer...");
+    log_info("Launching MSI installer...");
     run_msi_install(&downloaded)?;
 
     if let Some(app_path) = restart_app_path {
-        println!("Restarting Task Killer...");
+        log_info("Restarting Task Killer...");
         restart_app(app_path)?;
     }
 
-    println!("Update to {} completed.", release.version);
+    log_info(&format!("Update to {} completed.", release.version));
     Ok(())
 }
 
@@ -131,7 +137,9 @@ fn ensure_service_stopped(service_name: &str) -> Result<()> {
     match stop_windows_service(service_name) {
         Ok(()) => return Ok(()),
         Err(error) => {
-            eprintln!("Warning: graceful stop failed for {service_name}: {error:#}");
+            log_warn(&format!(
+                "graceful stop failed for {service_name}: {error:#}"
+            ));
         }
     }
 
@@ -281,6 +289,48 @@ fn print_help() {
     println!("Commands:");
     println!("  check");
     println!("  install [--current-version <semver>] [--wait-pid <pid>] [--restart-app-path <path>] [--service-name <name>]");
+}
+
+fn log_info(message: &str) {
+    println!("{message}");
+    write_updater_log("INFO", message);
+}
+
+fn log_warn(message: &str) {
+    eprintln!("Warning: {message}");
+    write_updater_log("WARN", message);
+}
+
+fn write_updater_log(level: &str, message: &str) {
+    let log_path = updater_log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = writeln!(file, "[{level}] {message}");
+    }
+}
+
+fn updater_log_path() -> PathBuf {
+    std::env::temp_dir().join("task_killer-updater.log")
+}
+
+fn show_error_dialog(details: &str) {
+    let message = format!(
+        "Task Killer update failed.\n\n{}\n\nLog: {}",
+        details,
+        updater_log_path().display()
+    );
+    let message_wide = to_utf16_null(&message);
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message_wide.as_ptr()),
+            w!("Task Killer Updater"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
 
 fn is_running_elevated() -> Result<bool> {
