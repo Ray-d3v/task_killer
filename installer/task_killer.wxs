@@ -87,7 +87,6 @@
             Name="tasktui-service"
             Start="install"
             Stop="both"
-            Remove="uninstall"
             Wait="no" />
         </Component>
       </Directory>

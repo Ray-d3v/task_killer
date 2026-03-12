@@ -41,6 +41,7 @@ fn run() -> Result<()> {
 
     log_info("Stopping tasktui-service before uninstall...");
     ensure_service_stopped(DEFAULT_SERVICE_NAME)?;
+    delete_service(DEFAULT_SERVICE_NAME)?;
 
     let uninstall_command = find_uninstall_command()?;
     log_info("Launching Task Killer uninstaller...");
@@ -146,6 +147,42 @@ fn ensure_service_stopped(service_name: &str) -> Result<()> {
     }
 
     Err(anyhow!("service {service_name} is still running after forced stop"))
+}
+
+fn delete_service(service_name: &str) -> Result<()> {
+    log_info(&format!("Deleting service {}...", service_name));
+    let status = Command::new("sc.exe")
+        .args(["delete", service_name])
+        .status()
+        .with_context(|| format!("delete service {service_name}"))?;
+
+    if !status.success() {
+        bail!(
+            "failed to delete {service_name}, sc.exe exited with {}",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if service_is_gone(service_name)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    Err(anyhow!("service {service_name} is still present after delete"))
+}
+
+fn service_is_gone(service_name: &str) -> Result<bool> {
+    let output = Command::new("sc.exe")
+        .args(["query", service_name])
+        .output()
+        .with_context(|| format!("query service state for {service_name}"))?;
+    Ok(!output.status.success())
 }
 
 fn query_service_pid(service_name: &str) -> Result<Option<u32>> {
