@@ -183,8 +183,19 @@ fn restart_app(app_path: &Path) -> Result<()> {
 
 fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Result<()> {
     unsafe {
-        let handle = OpenProcess(PROCESS_SYNCHRONIZE, false, pid)
-            .with_context(|| format!("open process {pid} for wait"))?;
+        let handle = match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let raw = error.code().0 as u32;
+                if raw == 87 || raw == 1168 {
+                    log_info(&format!(
+                        "Process {pid} is already gone before wait started; continuing update."
+                    ));
+                    return Ok(());
+                }
+                return Err(error).with_context(|| format!("open process {pid} for wait"));
+            }
+        };
         let wait_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         let result = WaitForSingleObject(handle, wait_ms);
         let _ = CloseHandle(handle);
