@@ -54,6 +54,8 @@ Artifacts:
 - `target/release/tasktui-app.exe`
 - `target/release/tasktui-service.exe`
 - `target/release/tasktuictl.exe`
+- `target/release/updater.exe`
+- `target/release/uninstall.exe`
 
 Or build the production distribution folder:
 
@@ -66,6 +68,8 @@ That writes:
 - `dist/tasktui-app.exe`
 - `dist/tasktui-service.exe`
 - `dist/tasktuictl.exe`
+- `dist/updater.exe`
+- `dist/uninstall.exe`
 - `dist/README.txt`
 
 ## Build the MSI installer
@@ -86,7 +90,41 @@ That writes:
 
 - `dist/task_killer-<version>-x64.msi`
 
-The MSI installs the TUI binaries into `Program Files\Task Killer`, creates a Start Menu shortcut, and installs `tasktui-service` as an auto-start `LocalSystem` service.
+The MSI installs the TUI binaries into `Program Files\Task Killer`, creates a Start Menu shortcut, installs `tasktui-service` as an auto-start `LocalSystem` service, and now requires signing configuration for production output.
+The installer also closes running `tasktui-app.exe`, `tasktuictl.exe`, and `tasktui-service.exe` before replacing files so upgrades can proceed when an older version is still open.
+
+## Signing requirements for public release
+
+Public release artifacts are expected to be signed with a commercial code-signing certificate. The scripts use `signtool.exe` from the Windows SDK and fail if signing inputs are missing.
+
+Required environment variables:
+
+- `TASK_KILLER_SIGN_CERT_PATH`
+- `TASK_KILLER_SIGN_CERT_PASSWORD`
+- `TASK_KILLER_SIGN_TIMESTAMP_URL`
+
+Optional environment variables:
+
+- `TASK_KILLER_SIGN_FILE_DIGEST`
+  - default: `sha256`
+- `TASK_KILLER_SIGN_TIMESTAMP_DIGEST`
+  - default: `sha256`
+
+Example:
+
+```powershell
+$env:TASK_KILLER_SIGN_CERT_PATH="C:\secure\codesign.pfx"
+$env:TASK_KILLER_SIGN_CERT_PASSWORD="secret"
+$env:TASK_KILLER_SIGN_TIMESTAMP_URL="http://timestamp.digicert.com"
+```
+
+Local development can still use:
+
+```powershell
+.\scripts\build-release.ps1
+```
+
+That path does not sign artifacts.
 
 ## Package GitHub release assets
 
@@ -101,6 +139,8 @@ That writes:
 - `dist/task_killer-<version>-x64-portable.zip`
 - `dist/task_killer-<version>-x64.msi`
 - `dist/SHA256SUMS.txt`
+
+The release script signs the `exe` and `msi` artifacts before creating the portable zip and checksum file.
 
 ## Checks
 
@@ -135,6 +175,18 @@ If you installed through the MSI, launch `Task Killer` from the Start Menu or ru
 
 ```powershell
 "$env:ProgramFiles\Task Killer\tasktui-app.exe"
+```
+
+To launch the packaged updater directly:
+
+```powershell
+"$env:ProgramFiles\Task Killer\updater.exe" check
+```
+
+To remove the installed app using the packaged executable:
+
+```powershell
+"$env:ProgramFiles\Task Killer\uninstall.exe"
 ```
 
 At startup the TUI sends `Ping` and shows service reachability in the status area.
@@ -193,6 +245,8 @@ Available helper commands:
 
 - `Tab` / `Shift+Tab` switch between `Processes`, `Performance`, `Storage`, `Services`, and `Network`
 - `/` search the active list tab
+- `u` check GitHub Releases for a newer version
+- `Shift+U` launch `updater.exe` and install the latest MSI
 - `s` cycle process sort mode
 - `t` toggle process tree view
 - `f` cycle the network state filter
@@ -238,12 +292,14 @@ Allowed administrative commands:
 
 ## Current limitations
 
-- General process restart is best-effort only
-  - the tool restarts the same executable path, but does not fully restore original arguments or working directory
+- In-app update installs require elevation because the updater stops a `LocalSystem` service and launches MSI
+- GitHub Releases must contain both `task_killer-<version>-x64.msi` and `SHA256SUMS.txt`
 - `watch`, auto-restart rules, `kill-port`, and dump capture are not implemented
 - Protected processes and protected services may still be inaccessible
 - `RequestCloseProcess` only works for processes with a closable top-level window
 - Performance view currently tracks only whole-system CPU and memory
+- A valid commercial signing certificate is required to remove `Unknown Publisher` warnings from public release artifacts
+- Windows Defender SmartScreen reputation warnings are not addressed by the signing scripts alone for brand new releases
 
 ## References
 
