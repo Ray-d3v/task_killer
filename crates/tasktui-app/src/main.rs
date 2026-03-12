@@ -20,6 +20,7 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 use sysinfo::{DiskRefreshKind, Disks, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use tasktui_app::update::{UpdateCheck, check_for_updates, launch_updater_for_install};
 use tasktui_core::{
     API_VERSION, AdminCommand, AdminResult, ApiRequest, ProcessPriority, ServiceRow, TasktuiError,
 };
@@ -1157,6 +1158,32 @@ fn handle_key_event(app: &mut AppState, key: KeyEvent) -> Result<bool> {
             open_context_menu_for_selection(app);
         }
         KeyCode::Char('/') => app.overlay = Overlay::Search,
+        KeyCode::Char('u') => {
+            app.feedback = match check_for_updates() {
+                Ok(UpdateCheck::UpToDate { current }) => {
+                    format!("Task Killer {current} is already up to date.")
+                }
+                Ok(UpdateCheck::UpdateAvailable { current, release }) => {
+                    format!(
+                        "Update available: {current} -> {}. Press Shift+U to install.",
+                        release.version
+                    )
+                }
+                Err(error) => format!("Update check failed: {error}"),
+            };
+        }
+        KeyCode::Char('U') => {
+            let current_exe = std::env::current_exe().context("resolve current executable")?;
+            match launch_updater_for_install(&current_exe) {
+                Ok(()) => {
+                    app.feedback = "Launching updater...".into();
+                    return Ok(true);
+                }
+                Err(error) => {
+                    app.feedback = format!("Failed to launch updater: {error}");
+                }
+            }
+        }
         KeyCode::Down => match app.pane_focus {
             PaneFocus::List => app.select_next(),
             PaneFocus::Detail => increment_detail_scroll(app),
@@ -2229,27 +2256,27 @@ fn render_network_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let lines = match app.active_tab {
         ActiveTab::Processes => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | s sort/off | t tree | Enter toggle pane focus | Shift+F10 menu"),
+            Line::from("Tab/Shift+Tab switch pages | / search | s sort/off | t tree | u check update | Shift+U install | Enter toggle pane focus | Shift+F10 menu"),
             Line::from("k close | K kill | r restart | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Performance => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search leaves query active for other tabs"),
+            Line::from("Tab/Shift+Tab switch pages | u check update | Shift+U install | / search leaves query active for other tabs"),
             Line::from("Performance keeps the last 60 samples of CPU and memory."),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Storage => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search leaves query active for other tabs"),
+            Line::from("Tab/Shift+Tab switch pages | u check update | Shift+U install | / search leaves query active for other tabs"),
             Line::from("Storage shows mounted volumes, usage, filesystem, and cumulative read/write bytes."),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Services => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | 1 start | 2 stop | 3 restart | Shift+F10 menu"),
+            Line::from("Tab/Shift+Tab switch pages | / search | u check update | Shift+U install | 1 start | 2 stop | 3 restart | Shift+F10 menu"),
             Line::from("Use right-click for a service context menu."),
             Line::from(app.feedback.clone()),
         ],
         ActiveTab::Network => vec![
-            Line::from("Tab/Shift+Tab switch pages | / search | f state filter | Enter toggle pane focus | Shift+F10 menu"),
+            Line::from("Tab/Shift+Tab switch pages | / search | u check update | Shift+U install | f state filter | Enter toggle pane focus | Shift+F10 menu"),
             Line::from("k close | K kill | r restart | z/x suspend-resume | 4 idle | 5 below | 6 normal | 7 above | 8 high"),
             Line::from(app.feedback.clone()),
         ],

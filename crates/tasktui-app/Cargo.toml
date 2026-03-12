@@ -8,6 +8,16 @@ version.workspace = true
 anyhow.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 sysinfo.workspace = true
 tasktui-core = { path = "../tasktui-core" }
 tasktui-platform-windows = { path = "../tasktui-platform-windows" }
+windows.workspace = true
+winreg.workspace = true
+
+[build-dependencies]
+winresource = "0.1.27"

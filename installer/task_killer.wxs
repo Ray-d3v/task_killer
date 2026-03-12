@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
     Name="Task Killer"
     Manufacturer="Ray-d3v"
@@ -9,8 +10,43 @@
     Scope="perMachine"
     Language="1033">
     <SummaryInformation Description="Task Killer Windows installer" Manufacturer="Ray-d3v" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Task Killer is already installed." />
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of Task Killer is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <util:CloseApplication
+      Id="CloseTasktuiApp"
+      Target="tasktui-app.exe"
+      Description="Task Killer is running and must be closed before the update continues."
+      CloseMessage="yes"
+      ElevatedCloseMessage="yes"
+      EndSessionMessage="yes"
+      ElevatedEndSessionMessage="yes"
+      Timeout="5"
+      RebootPrompt="no"
+      TerminateProcess="0" />
+    <util:CloseApplication
+      Id="CloseTasktuiCtl"
+      Target="tasktuictl.exe"
+      Description="tasktuictl is running and must be closed before the update continues."
+      CloseMessage="yes"
+      ElevatedCloseMessage="yes"
+      EndSessionMessage="yes"
+      ElevatedEndSessionMessage="yes"
+      Timeout="5"
+      RebootPrompt="no"
+      TerminateProcess="0" />
+    <util:CloseApplication
+      Id="CloseTasktuiService"
+      Target="tasktui-service.exe"
+      Description="tasktui-service must be stopped before the update continues."
+      CloseMessage="no"
+      ElevatedCloseMessage="no"
+      EndSessionMessage="no"
+      ElevatedEndSessionMessage="no"
+      Timeout="5"
+      RebootPrompt="no"
+      TerminateProcess="1" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Task Killer">
@@ -20,6 +56,14 @@
 
         <Component Id="TasktuiCtlComponent" Guid="*">
           <File Id="TasktuiCtlFile" Source="target\release\tasktuictl.exe" KeyPath="yes" />
+        </Component>
+
+        <Component Id="UninstallComponent" Guid="*">
+          <File Id="UninstallFile" Source="target\release\uninstall.exe" KeyPath="yes" />
+        </Component>
+
+        <Component Id="UpdaterComponent" Guid="*">
+          <File Id="UpdaterFile" Source="target\release\updater.exe" KeyPath="yes" />
         </Component>
 
         <Component Id="ReadmeComponent" Guid="*">
@@ -44,7 +88,7 @@
             Start="install"
             Stop="both"
             Remove="uninstall"
-            Wait="yes" />
+            Wait="no" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -58,6 +102,12 @@
             Description="Open Task Killer"
             Target="[INSTALLFOLDER]tasktui-app.exe"
             WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut
+            Id="TaskKillerUninstallShortcut"
+            Name="Uninstall Task Killer"
+            Description="Remove Task Killer"
+            Target="[INSTALLFOLDER]uninstall.exe"
+            WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="ApplicationProgramsFolderRemove" Directory="ApplicationProgramsFolder" On="uninstall" />
           <RegistryValue Root="HKLM" Key="Software\Ray-d3v\TaskKiller" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
         </Component>
@@ -67,6 +117,8 @@
     <Feature Id="MainFeature" Title="Task Killer" Level="1">
       <ComponentRef Id="TasktuiAppComponent" />
       <ComponentRef Id="TasktuiCtlComponent" />
+      <ComponentRef Id="UninstallComponent" />
+      <ComponentRef Id="UpdaterComponent" />
       <ComponentRef Id="ReadmeComponent" />
       <ComponentRef Id="ServiceComponent" />
       <ComponentRef Id="ProgramMenuShortcutComponent" />
