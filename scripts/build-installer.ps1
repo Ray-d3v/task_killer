@@ -10,6 +10,8 @@ if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
     throw "WiX Toolset is not installed. Run 'dotnet tool install --global wix' first."
 }
 
+& wix extension add --global WixToolset.Util.wixext/6.0.2 | Out-Null
+
 $versionLine = Select-String -Path $cargoToml -Pattern '^version = "(.+)"$' | Select-Object -First 1
 if (-not $versionLine) {
     throw "Could not read workspace version from Cargo.toml"
@@ -27,9 +29,12 @@ Push-Location $root
 try {
     wix build `
         -arch x64 `
+        -ext WixToolset.Util.wixext `
         -d ProductVersion=$version `
         installer\task_killer.wxs `
         -o $msiPath
+
+    & (Join-Path $PSScriptRoot "sign-artifacts.ps1")
 }
 finally {
     Pop-Location

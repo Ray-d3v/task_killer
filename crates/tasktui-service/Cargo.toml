@@ -10,3 +10,6 @@ tasktui-core = { path = "../tasktui-core" }
 tasktui-platform-windows = { path = "../tasktui-platform-windows" }
 windows.workspace = true
 windows-service.workspace = true
+
+[build-dependencies]
+winresource = "0.1.27"

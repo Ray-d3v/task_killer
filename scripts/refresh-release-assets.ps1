@@ -4,20 +4,15 @@ $root = Split-Path -Parent $PSScriptRoot
 $cargoToml = Join-Path $root "Cargo.toml"
 $dist = Join-Path $root "dist"
 $portableDir = Join-Path $dist "portable"
-
 $versionLine = Select-String -Path $cargoToml -Pattern '^version = "(.+)"$' | Select-Object -First 1
 if (-not $versionLine) {
     throw "Could not read workspace version from Cargo.toml"
 }
 
 $version = $versionLine.Matches[0].Groups[1].Value
-$zipName = "task_killer-$version-x64-portable.zip"
-$msiName = "task_killer-$version-x64.msi"
-$zipPath = Join-Path $dist $zipName
-$msiPath = Join-Path $dist $msiName
+$zipPath = Join-Path $dist "task_killer-$version-x64-portable.zip"
+$msiPath = Join-Path $dist "task_killer-$version-x64.msi"
 $shaFile = Join-Path $dist "SHA256SUMS.txt"
-
-& (Join-Path $PSScriptRoot "build-installer.ps1")
 
 if (Test-Path $portableDir) {
     Remove-Item -Recurse -Force $portableDir
@@ -40,9 +35,9 @@ if (Test-Path $zipPath) {
 
 Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
 
-$hashTargets = @($zipPath, $msiPath)
-$lines = foreach ($file in $hashTargets) {
+$lines = foreach ($file in @($zipPath, $msiPath)) {
     $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
     "{0} *{1}" -f $hash, (Split-Path -Leaf $file)
 }
+
 $lines | Set-Content -Path $shaFile -Encoding ascii
