@@ -1,3 +1,7 @@
+param(
+    [switch]$SkipSigning
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -17,7 +21,11 @@ $zipPath = Join-Path $dist $zipName
 $msiPath = Join-Path $dist $msiName
 $shaFile = Join-Path $dist "SHA256SUMS.txt"
 
-& (Join-Path $PSScriptRoot "build-installer.ps1")
+if ($SkipSigning) {
+    & (Join-Path $PSScriptRoot "build-installer.ps1") -SkipSigning
+} else {
+    & (Join-Path $PSScriptRoot "build-installer.ps1")
+}
 
 if (Test-Path $portableDir) {
     Remove-Item -Recurse -Force $portableDir

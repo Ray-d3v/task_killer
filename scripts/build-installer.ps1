@@ -1,3 +1,7 @@
+param(
+    [switch]$SkipSigning
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -34,7 +38,9 @@ try {
         installer\task_killer.wxs `
         -o $msiPath
 
-    & (Join-Path $PSScriptRoot "sign-artifacts.ps1")
+    if (-not $SkipSigning) {
+        & (Join-Path $PSScriptRoot "sign-artifacts.ps1")
+    }
 }
 finally {
     Pop-Location
